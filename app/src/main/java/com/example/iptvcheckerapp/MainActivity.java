@@ -57,8 +57,9 @@ public class MainActivity extends Activity {
     private LinearLayout panelBox;
     private CheckBox cbAll, cbM3u;
     private SeekBar sbThreads;
-    private Button btnStart, btnChannels, btnExport;
+    private Button btnStart, btnChannels, btnExport, btnOpenList;
     private String pendingExport;
+    private int pendingExportCount;
 
     private final List<Account> fileAccounts = new ArrayList<>();
     private List<Account> allAccounts = new ArrayList<>();
@@ -216,6 +217,8 @@ public class MainActivity extends Activity {
         root.addView(btnStart, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
         btnChannels = Ui.button(this, "📺  Kanal Listesine Bak", Ui.WHITE, Ui.PRIMARY);
         root.addView(btnChannels, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
+        btnOpenList = Ui.button(this, "📂  Kayıtlı listemi aç", Ui.WHITE, Ui.PRIMARY);
+        root.addView(btnOpenList, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
         btnExport = Ui.button(this, "📤  Kayıtlı linkleri dışa aktar", Ui.WHITE, Ui.PRIMARY);
         root.addView(btnExport, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
 
@@ -264,6 +267,12 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View v) {
                 startCheck();
+            }
+        });
+        btnOpenList.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startActivity(new Intent(MainActivity.this, SavedListActivity.class));
             }
         });
         btnExport.setOnClickListener(new View.OnClickListener() {
@@ -433,19 +442,18 @@ public class MainActivity extends Activity {
 
     private void updateExportLabel() {
         int n = SavedLinks.count(this);
+        btnOpenList.setText("📂  Kayıtlı listemi aç (" + n + ")");
         btnExport.setText("📤  Kayıtlı linkleri dışa aktar (" + n + ")");
         btnExport.setAlpha(n == 0 ? 0.45f : 1f);
     }
 
     private void exportSavedLinks() {
-        List<String> links = SavedLinks.all(this);
-        if (links.isEmpty()) {
+        if (SavedLinks.isEmpty(this)) {
             Toast.makeText(this, "Listende kayıtlı link yok. Sonuç ekranından \"Listeme ekle\" ile link ekle", Toast.LENGTH_LONG).show();
             return;
         }
-        StringBuilder sb = new StringBuilder();
-        for (String l : links) sb.append(l).append('\n');
-        pendingExport = sb.toString();
+        pendingExport = SavedLinks.exportText(this);
+        pendingExportCount = SavedLinks.count(this);
         String stamp = new SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(new Date());
         Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);
@@ -464,7 +472,7 @@ public class MainActivity extends Activity {
         pendingExport = null;
         if (resultCode != RESULT_OK || data == null || data.getData() == null || text == null) return;
         final Uri uri = data.getData();
-        final int count = text.split("\n").length;
+        final int count = pendingExportCount;
         io.execute(new Runnable() {
             @Override
             public void run() {

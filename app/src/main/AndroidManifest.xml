@@ -35,6 +35,11 @@
             android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
             android:windowSoftInputMode="adjustResize" />
 
+        <activity
+            android:name=".SavedListActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout" />
+
     </application>
 
 </manifest>

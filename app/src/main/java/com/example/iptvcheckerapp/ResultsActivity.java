@@ -739,13 +739,11 @@ public class ResultsActivity extends Activity {
             Toast.makeText(this, "Eklenecek link yok", Toast.LENGTH_SHORT).show();
             return;
         }
-        List<String> links = new ArrayList<>();
-        for (CheckResult r : shown) links.add(r.account.original);
-        int added = SavedLinks.add(this, links);
+        int added = SavedLinks.add(this, new ArrayList<>(shown));
         int total = SavedLinks.count(this);
-        int already = links.size() - added;
+        int already = shown.size() - added;
         String msg = added + " link eklendi. Listende toplam " + total + " link var.";
-        if (already > 0) msg += " (" + already + " tanesi zaten vardı)";
+        if (already > 0) msg += " (" + already + " tanesi zaten vardı, bilgileri güncellendi)";
         Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
     }
 

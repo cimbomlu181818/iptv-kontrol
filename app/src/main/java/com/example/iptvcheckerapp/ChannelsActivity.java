@@ -43,10 +43,8 @@ import java.text.Collator;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -60,7 +58,6 @@ public class ChannelsActivity extends Activity {
 
     private static final String TAG = "IPTVPlay";
 
-    private static final int MAX_TRIES = 20;
     private static final int MAX_HITS = 400;
     private static final long MAX_BYTES = 40L * 1024 * 1024;
 
@@ -85,6 +82,10 @@ public class ChannelsActivity extends Activity {
     // Açık bağlantılar: ekrandan çıkınca hemen kapatılır
     private final Set<HttpURLConnection> active = ConcurrentHashMap.newKeySet();
     private volatile AccountChecker reasonChecker;
+
+    // Kullanıcının seçtiği bölümler: [0] canlı TV, [1] filmler, [2] diziler
+    private volatile boolean[] wanted = {true, true, true};
+    private AlertDialog partsDialog;
 
     // Ekran parçaları
     private TextView tvStatus;
@@ -131,15 +132,102 @@ public class ChannelsActivity extends Activity {
             finish();
             return;
         }
+        askParts(list);
+    }
+
+    // ------------------------------------------------------------------ bölüm seçimi
+
+    /** İndirmeden önce hangi bölümlerin (canlı / film / dizi) istendiğini sorar. */
+    private void askParts(final List<Account> list) {
+        tvStatus.setText("Hangi listelerin indirileceğini seç");
+        final String[] items = {"📺 Canlı TV", "🎬 Filmler", "🎞 Diziler"};
+        final boolean[] checked = {false, false, false};
+        partsDialog = new AlertDialog.Builder(this)
+                .setTitle("Hangi listeler indirilsin?")
+                .setMultiChoiceItems(items, checked, new DialogInterface.OnMultiChoiceClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which, boolean isChecked) {
+                        checked[which] = isChecked;
+                        Button ok = ((AlertDialog) d).getButton(DialogInterface.BUTTON_POSITIVE);
+                        if (ok != null) ok.setEnabled(checked[0] || checked[1] || checked[2]);
+                    }
+                })
+                .setPositiveButton("İndir", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        wanted = checked.clone();
+                        startLoading(list);
+                    }
+                })
+                .setNegativeButton("İptal", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        finish();
+                    }
+                })
+                .create();
+        partsDialog.setCanceledOnTouchOutside(false);
+        partsDialog.setOnCancelListener(new DialogInterface.OnCancelListener() {
+            @Override
+            public void onCancel(DialogInterface d) {
+                finish();
+            }
+        });
+        partsDialog.show();
+        // En az bir bölüm seçilmeden "İndir" açılmaz
+        partsDialog.getButton(DialogInterface.BUTTON_POSITIVE).setEnabled(false);
+    }
+
+    private void startLoading(List<Account> list) {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         startPulse();
         load(list);
+    }
+
+    private boolean allWanted() {
+        boolean[] w = wanted;
+        return w[0] && w[1] && w[2];
+    }
+
+    private boolean isWanted(String groupName) {
+        boolean[] w = wanted;
+        if (M3UParser.LIVE.equals(groupName)) return w[0];
+        if (M3UParser.MOVIES.equals(groupName)) return w[1];
+        if (M3UParser.SERIES.equals(groupName)) return w[2];
+        return false;
+    }
+
+    /** M3U tamamen indiğinde, seçilmeyen bölümleri sonuçtan çıkarır. */
+    private void filterWanted(M3UParser.Result r) {
+        List<M3UParser.Group> keep = new ArrayList<>();
+        int channels = 0;
+        int cats = 0;
+        for (M3UParser.Group g : r.groups) {
+            if (!isWanted(g.name)) continue;
+            keep.add(g);
+            channels += g.channelCount();
+            cats += g.categories.size();
+        }
+        r.groups.clear();
+        r.groups.addAll(keep);
+        r.channelCount = channels;
+        r.categoryCount = cats;
+    }
+
+    private String wantedText() {
+        boolean[] w = wanted;
+        StringBuilder sb = new StringBuilder();
+        if (w[0]) sb.append("Canlı TV");
+        if (w[1]) sb.append(sb.length() > 0 ? ", " : "").append("Filmler");
+        if (w[2]) sb.append(sb.length() > 0 ? ", " : "").append("Diziler");
+        return sb.toString();
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
         cancelled = true;
+        if (partsDialog != null && partsDialog.isShowing()) partsDialog.dismiss();
         stopPulse();
         Http.disconnectAsync(active);
         AccountChecker rc = reasonChecker;
@@ -162,59 +250,32 @@ public class ChannelsActivity extends Activity {
     // ------------------------------------------------------------------ yükleme
 
     private void load(final List<Account> list) {
-        final int max = Math.min(MAX_TRIES, list.size());
+        final Account a = list.get(0);
         tvStatus.setText("⏳ Kanal listesi aranıyor…");
         io.execute(new Runnable() {
             @Override
             public void run() {
-                // Başarısızlık nedenleri (aynı neden tekrar ederse sayılır)
-                Map<String, Integer> reasons = new LinkedHashMap<>();
-                int tried = 0;
-                for (int i = 0; i < max && !cancelled; i++) {
-                    final Account a = list.get(i);
-                    final int index = i + 1;
-                    tried++;
-                    postStart(a.panelKey(), index, max);
-                    Attempt at = tryAccount(a);
-                    if (cancelled) return;
-                    if (at.result != null) {
-                        final M3UParser.Result r = at.result;
-                        final String panel = a.panelKey();
-                        handler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                show(r, panel);
-                            }
-                        });
-                        return;
-                    }
-                    if (at.oom) {
-                        postFail("❌ Liste çok büyük, telefonun belleği yetmedi");
-                        return;
-                    }
-                    Integer n = reasons.get(at.reason);
-                    reasons.put(at.reason, n == null ? 1 : n + 1);
-                }
+                postStart(a.panelKey());
+                Attempt at = tryAccount(a);
                 if (cancelled) return;
-                postFail(buildFailMessage(reasons, tried, list.size()));
+                if (at.result != null) {
+                    final M3UParser.Result r = at.result;
+                    final String panel = a.panelKey();
+                    handler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            show(r, panel);
+                        }
+                    });
+                    return;
+                }
+                if (at.oom) {
+                    postFail("❌ Liste çok büyük, telefonun belleği yetmedi");
+                    return;
+                }
+                postFail("❌ Kanal listesi alınamadı: " + at.reason);
             }
         });
-    }
-
-    private String buildFailMessage(Map<String, Integer> reasons, int tried, int totalLinks) {
-        if (tried <= 1 && reasons.size() == 1) {
-            return "❌ Kanal listesi alınamadı: " + reasons.keySet().iterator().next();
-        }
-        StringBuilder sb = new StringBuilder("❌ Kanal listesi alınamadı (" + tried + " hesap denendi");
-        if (totalLinks > tried) sb.append(", ").append(totalLinks).append(" linkin ilk ").append(tried).append("'i");
-        sb.append(")");
-        int shown = 0;
-        for (Map.Entry<String, Integer> e : reasons.entrySet()) {
-            if (shown++ >= 4) break;
-            sb.append("\n• ").append(e.getKey());
-            if (e.getValue() > 1) sb.append("  ×").append(e.getValue());
-        }
-        return sb.toString();
     }
 
     /** Tek bir hesabı dener: önce M3U (kategorili), gerekirse panel API'si, olmazsa nedenini bulur. */
@@ -222,11 +283,41 @@ public class ChannelsActivity extends Activity {
         final Attempt at = new Attempt();
         M3UParser.Result best = null;
         boolean unreachable = false;
+        final boolean partial = !allWanted();
+        boolean apiTried = false;
+
+        // Sadece bazı bölümler seçildiyse önce panel API'si denenir: yalnızca seçilen bölümler iner
+        if (partial) {
+            apiTried = true;
+            postApiStage();
+            try {
+                M3UParser.Result api = ApiCatalog.load(a, active, new ApiCatalog.Control() {
+                    @Override
+                    public boolean cancelled() {
+                        return cancelled;
+                    }
+                }, new ApiCatalog.Progress() {
+                    @Override
+                    public void onProgress(int step, int steps, String label, long bytes, long total, int channels) {
+                        postApiProgress(step, steps, label, bytes, total, channels);
+                    }
+                }, wanted);
+                if (api.channelCount > 0) best = api;
+            } catch (IOException e) {
+                if (cancelled) return at;
+                at.reason = AccountChecker.describe(e);
+                unreachable = AccountChecker.isUnreachable(e);
+            } catch (OutOfMemoryError e) {
+                at.oom = true;
+                return at;
+            }
+        }
 
         // Önce kategorili (m3u_plus) liste, olmazsa linkin kendi hali denenir
         String[] urls = a.listUrl().equals(a.original)
                 ? new String[]{a.original}
                 : new String[]{a.listUrl(), a.original};
+        if (best != null || unreachable) urls = new String[0];
         for (String url : urls) {
             if (cancelled) return at;
             HttpURLConnection c = null;
@@ -245,9 +336,15 @@ public class ChannelsActivity extends Activity {
                         postDownload(bytes, len, channels);
                     }
                 });
+                final int rawCount = r.channelCount;
+                if (partial) filterWanted(r);
                 if (r.channelCount > 0) {
                     best = r;
                     break;
+                }
+                if (partial && rawCount > 0) {
+                    at.reason = "Seçilen bölümlerde kanal bulunamadı";
+                    break;          // liste geldi ama seçilenler boş: ikinci linki indirmenin anlamı yok
                 }
                 at.reason = "Liste boş geldi";
             } catch (IOException e) {
@@ -266,7 +363,7 @@ public class ChannelsActivity extends Activity {
         }
 
         // Liste kategorisizse ya da hiç alınamadıysa panelin API'sinden kategorili liste kur
-        boolean needApi = !unreachable && (best == null || M3UParser.isUncategorized(best));
+        boolean needApi = !apiTried && !unreachable && (best == null || M3UParser.isUncategorized(best));
         if (needApi && !cancelled) {
             postApiStage();
             try {
@@ -320,11 +417,11 @@ public class ChannelsActivity extends Activity {
 
     // ------------------------------------------------------------------ indirme kartı (arayüz iş parçacığı)
 
-    private void postStart(final String panel, final int index, final int max) {
+    private void postStart(final String panel) {
         handler.post(new Runnable() {
             @Override
             public void run() {
-                tvStatus.setText("⏳ " + index + "/" + max + " deneniyor: " + panel);
+                tvStatus.setText("⏳ Kanal listesi alınıyor: " + panel);
                 tvStage.setText("🔌 Sunucuya bağlanılıyor…");
                 tvDetail.setText(panel);
                 setProgress(-1, "…");
@@ -467,6 +564,7 @@ public class ChannelsActivity extends Activity {
         }
         String text = "✅ " + r.groups.size() + " ana grup  •  " + r.categoryCount + " kategori  •  "
                 + r.channelCount + " kanal   (" + panel + ")";
+        if (!allWanted()) text += "\n🎯 Seçilen: " + wantedText();
         if (r.fromApi) text += "\nℹ️ Kategoriler panelin API'sinden alındı";
         if (r.truncated) text += "\n⚠️ Liste çok büyük, bir kısmı gösteriliyor";
         summaryText = text;
@@ -929,7 +1027,8 @@ public class ChannelsActivity extends Activity {
         public View getGroupView(int g, boolean isExpanded, View convertView, ViewGroup parent) {
             TextView t = convertView instanceof TextView ? (TextView) convertView : new TextView(ChannelsActivity.this);
             M3UParser.Group grp = data.groups.get(g);
-            t.setText(grp.name + "   •   " + grp.channelCount() + " kanal");
+            int catCount = g < view.size() ? view.get(g).size() : grp.categories.size();
+            t.setText(grp.name + "   •   " + catCount + " kategori   •   " + grp.channelCount() + " kanal");
             t.setTextSize(15);
             t.setTypeface(Typeface.DEFAULT_BOLD);
             t.setTextColor(Ui.TEXT);

@@ -57,7 +57,7 @@ public class MainActivity extends Activity {
     private LinearLayout panelBox;
     private CheckBox cbAll, cbM3u;
     private SeekBar sbThreads;
-    private Button btnStart, btnChannels, btnExport, btnOpenList;
+    private Button btnStart, btnExport, btnOpenList;
     private String pendingExport;
     private int pendingExportCount;
 
@@ -215,8 +215,6 @@ public class MainActivity extends Activity {
         btnStart = Ui.button(this, "▶  Kontrolü Başlat", Ui.PRIMARY, Ui.WHITE);
         btnStart.setTextSize(16);
         root.addView(btnStart, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
-        btnChannels = Ui.button(this, "📺  Kanal Listesine Bak", Ui.WHITE, Ui.PRIMARY);
-        root.addView(btnChannels, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
         btnOpenList = Ui.button(this, "📂  Kayıtlı listemi aç", Ui.WHITE, Ui.PRIMARY);
         root.addView(btnOpenList, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
         btnExport = Ui.button(this, "📤  Kayıtlı linkleri dışa aktar", Ui.WHITE, Ui.PRIMARY);
@@ -279,12 +277,6 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View v) {
                 exportSavedLinks();
-            }
-        });
-        btnChannels.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                openChannels();
             }
         });
         updateThreadsText();
@@ -402,7 +394,9 @@ public class MainActivity extends Activity {
 
     private void updateInfo() {
         int selected = selectedAccounts().size();
-        tvFound.setText(allAccounts.size() + " link  •  " + panelCounts.size() + " panel  •  seçili: " + selected + " link");
+        int selectedPanels = panelCounts.size() - deselected.size();
+        tvFound.setText(allAccounts.size() + " link  •  " + panelCounts.size() + " panel  •  seçili: "
+                + selectedPanels + " panel, " + selected + " link");
 
         updatingUi = true;
         cbAll.setChecked(!panelCounts.isEmpty() && deselected.isEmpty());
@@ -411,9 +405,7 @@ public class MainActivity extends Activity {
 
         boolean enabled = selected > 0;
         btnStart.setEnabled(enabled);
-        btnChannels.setEnabled(enabled);
         btnStart.setAlpha(enabled ? 1f : 0.45f);
-        btnChannels.setAlpha(enabled ? 1f : 0.45f);
     }
 
     // ------------------------------------------------------------------ pano ve dosya
@@ -595,16 +587,6 @@ public class MainActivity extends Activity {
         Session.checkM3u = cbM3u.isChecked();
         Session.threads = sbThreads.getProgress() + 1;
         startActivity(new Intent(this, ResultsActivity.class));
-    }
-
-    private void openChannels() {
-        List<Account> sel = selectedAccounts();
-        if (sel.isEmpty()) {
-            Toast.makeText(this, "Önce link ekleyip en az bir panel seç", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        Session.channelAccounts = sel;
-        startActivity(new Intent(this, ChannelsActivity.class));
     }
 
     // ------------------------------------------------------------------ kayıt

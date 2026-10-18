@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="16dp"
+    tools:context=".MainActivity">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <!-- Başlık -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="IPTV Link Kontrol"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:gravity="center"
+            android:layout_marginBottom="32dp" />
+
+        <!-- Dosya Seçme Bölümü -->
+        <Button
+            android:id="@+id/btnSelectFile"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="📁 TXT veya DOCX Dosyası Seç"
+            android:textSize="16sp"
+            android:layout_marginBottom="16dp" />
+
+        <TextView
+            android:id="@+id/tvSelectedFile"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Henüz dosya seçilmedi"
+            android:textSize="14sp"
+            android:layout_marginBottom="16dp" />
+
+        <!-- Panel Seçim Bölümü -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="🌐 Panel Seçimi:"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
+
+        <CheckBox
+            android:id="@+id/cbSelectAllPanels"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Tüm Paneller"
+            android:textSize="14sp"
+            android:layout_marginBottom="8dp" />
+
+        <LinearLayout
+            android:id="@+id/panelSelectionLayout"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="#F5F5F5"
+            android:padding="12dp"
+            android:layout_marginBottom="16dp"
+            android:visibility="gone">
+
+            <!-- Panel checkbox'ları buraya dinamik olarak eklenecek -->
+
+        </LinearLayout>
+
+        <!-- Manuel Link Girişi Bölümü -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="📝 VEYA Manuel Link Girişi:"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
+
+        <EditText
+            android:id="@+id/etManualLinks"
+            android:layout_width="match_parent"
+            android:layout_height="200dp"
+            android:gravity="top"
+            android:inputType="textMultiLine"
+            android:minLines="8"
+            android:maxLines="15"
+            android:scrollbars="vertical"
+            android:background="@drawable/edittext_border"
+            android:padding="12dp"
+            android:layout_marginBottom="16dp"
+            android:hint="Buraya IPTV linklerini yapıştırın...&#10;Her satıra bir link:&#10;http://example.com:8080/get.php?username=test1&amp;password=pass1&amp;type=m3u&#10;http://server.com:8090/get.php?username=test2&amp;password=pass2&amp;type=m3u" />
+
+        <!-- Kontrol Butonu -->
+        <Button
+            android:id="@+id/btnStartCheck"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="🚀 KONTROLÜ BAŞLAT"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:backgroundTint="#FF5722"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="16dp"
+            android:enabled="false" />
+        <!-- Kanal Listesi Butonu -->
+        <Button
+            android:id="@+id/btnChannelList"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="📺 KANAL LİSTESİNİ BUL"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:backgroundTint="#4CAF50"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="16dp"
+            android:enabled="false" />
+
+        <!-- Progress Bar -->
+        <ProgressBar
+            android:id="@+id/progressBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:indeterminate="true"
+            android:visibility="gone" />
+
+        <!-- Durum Bilgisi -->
+        <TextView
+            android:id="@+id/tvProgress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Hazır..."
+            android:textSize="14sp"
+            android:gravity="center" />
+
+    </LinearLayout>
+
+</ScrollView>

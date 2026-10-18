@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    tools:context=".ResultActivity">
+
+    <!-- Başlık -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="IPTV Kontrol Sonuçları"
+        android:textSize="24sp"
+        android:textStyle="bold"
+        android:gravity="center"
+        android:padding="16dp"
+        android:background="#2196F3"
+        android:textColor="#FFFFFF" />
+
+    <!-- Özet Bilgi -->
+    <TextView
+        android:id="@+id/tvResultSummary"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Toplam: 0 | Aktif: 0 | Pasif: 0"
+        android:textSize="14sp"
+        android:gravity="center"
+        android:padding="12dp"
+        android:background="#E3F2FD"
+        android:textColor="#000000" />
+
+    <!-- Filtreleme Butonları -->
+    <!-- Filtreleme Butonları kısmına yeni buton ekle -->
+    <HorizontalScrollView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:scrollbars="none"
+        android:background="#F5F5F5">
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:padding="8dp">
+
+            <Button
+                android:id="@+id/btnFilterMaxUsers"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="👥 Kullanıcı ▼"
+                android:textSize="13sp"
+                android:layout_marginEnd="4dp"
+                android:backgroundTint="#9C27B0"
+                android:minWidth="120dp" />
+
+            <Button
+                android:id="@+id/btnFilterDate"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="📅 Tarih ▼"
+                android:textSize="13sp"
+                android:layout_marginEnd="4dp"
+                android:backgroundTint="#FF9800"
+                android:minWidth="110dp" />
+
+            <!-- YENİ BUTON -->
+            <Button
+                android:id="@+id/btnFilterDomain"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="🌐 Domain ▼"
+                android:textSize="13sp"
+                android:layout_marginEnd="4dp"
+                android:backgroundTint="#2196F3"
+                android:minWidth="110dp" />
+
+            <Button
+                android:id="@+id/btnFilterStatus"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="✅ Durum ▼"
+                android:textSize="13sp"
+                android:layout_marginEnd="4dp"
+                android:backgroundTint="#4CAF50"
+                android:minWidth="110dp" />
+
+            <Button
+                android:id="@+id/btnShowActive"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="⚡ Aktif"
+                android:textSize="13sp"
+                android:layout_marginEnd="4dp"
+                android:backgroundTint="#2196F3"
+                android:minWidth="90dp" />
+
+            <Button
+                android:id="@+id/btnShowAll"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="📋 Tümü"
+                android:textSize="13sp"
+                android:layout_marginEnd="4dp"
+                android:backgroundTint="#9E9E9E"
+                android:minWidth="90dp"
+                android:enabled="false" />
+
+            <Button
+                android:id="@+id/btnClearAllFilters"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="🔄 Sıfırla"
+                android:textSize="13sp"
+                android:backgroundTint="#FF5722"
+                android:minWidth="90dp" />
+
+        </LinearLayout>
+
+    </HorizontalScrollView>
+
+    <!-- Aktif Filtre Bilgisi -->
+    <TextView
+        android:id="@+id/tvActiveFilters"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text=""
+        android:textSize="12sp"
+        android:gravity="center"
+        android:padding="8dp"
+        android:background="#FFF9C4"
+        android:textColor="#F57F17"
+        android:visibility="gone" />
+
+    <!-- Sonuç Listesi -->
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/recyclerViewResults"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:padding="4dp"
+        android:background="#FFFFFF" />
+
+    <!-- Alt Butonlar -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="16dp"
+        android:background="#F5F5F5">
+
+        <Button
+            android:id="@+id/btnBack"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="⬅️ GERİ DÖN"
+            android:textSize="16sp"
+            android:backgroundTint="#607D8B"
+            android:textColor="#FFFFFF" />
+
+    </LinearLayout>
+
+</LinearLayout>

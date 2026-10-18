@@ -11,6 +11,7 @@ import java.net.HttpURLConnection;
 import java.net.NoRouteToHostException;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
+import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -30,14 +31,18 @@ public class AccountChecker {
     private static final int API_MAX_BYTES = 1000000;
     private static final long M3U_MAX_BYTES = 20L * 1024 * 1024;   // en fazla bu kadar indirilir (kota tasarrufu)
     private static final long M3U_MAX_MS = 20000;
-    private static final int DEAD_HOST_LIMIT = 2;
+    private static final int DEAD_HOST_LIMIT = 3;
+    // Ulaşılamıyor diye işaretlenen panel bu süre sonra yeniden denenir (geçici internet kesintisi için)
+    private static final long DEAD_HOST_TTL_MS = 60000;
+    // Sunucu saati ile telefon saati arasındaki fark bundan büyükse sunucu saatine güvenilmez
+    private static final long MAX_CLOCK_OFFSET_MS = 365L * 86400000L;
 
     private final boolean checkM3u;
     // Şu anda açık olan bağlantılar: Durdur'a basılınca hemen kapatılır
     private final Set<HttpURLConnection> active = ConcurrentHashMap.newKeySet();
     private volatile boolean cancelled = false;
     // Bu oturumda üst üste bağlantı kurulamayan paneller (aynı panele tekrar tekrar zaman kaybetmemek için)
-    private final Set<String> deadHosts = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<String, Long> deadHosts = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicInteger> failures = new ConcurrentHashMap<>();
 
     public AccountChecker(boolean checkM3u) {
@@ -55,11 +60,17 @@ public class AccountChecker {
         if (cancelled) return r;
         String panel = a.panelKey();
 
-        if (deadHosts.contains(panel)) {
-            r.hostUnreachable = true;
-            r.apiMessage = "Panele ulaşılamıyor";
-            r.m3uMessage = "Panele ulaşılamıyor";
-            return r;
+        Long deadSince = deadHosts.get(panel);
+        if (deadSince != null) {
+            if (System.currentTimeMillis() - deadSince < DEAD_HOST_TTL_MS) {
+                r.hostUnreachable = true;
+                r.apiMessage = "Panele ulaşılamıyor";
+                r.m3uMessage = "Panele ulaşılamıyor";
+                return r;
+            }
+            // Süre doldu: panele bir şans daha ver
+            deadHosts.remove(panel);
+            failures.remove(panel);
         }
 
         checkApi(a, r);
@@ -71,7 +82,7 @@ public class AccountChecker {
                 failures.putIfAbsent(panel, new AtomicInteger(0));
                 n = failures.get(panel);
             }
-            if (n.incrementAndGet() >= DEAD_HOST_LIMIT) deadHosts.add(panel);
+            if (n.incrementAndGet() >= DEAD_HOST_LIMIT) deadHosts.put(panel, System.currentTimeMillis());
             r.m3uMessage = "Sunucuya ulaşılamadı";
             return r;
         }
@@ -110,7 +121,7 @@ public class AccountChecker {
                 r.apiMessage = "Hesap bilgisi alınamadı";
                 return;
             }
-            parseUserInfo(ui, r);
+            parseUserInfo(ui, json.optJSONObject("server_info"), r);
         } catch (JSONException e) {
             r.apiMessage = "API yanıtı geçersiz";
         } catch (IOException e) {
@@ -122,7 +133,7 @@ public class AccountChecker {
         }
     }
 
-    private void parseUserInfo(JSONObject ui, CheckResult r) {
+    private void parseUserInfo(JSONObject ui, JSONObject serverInfo, CheckResult r) {
         String auth = str(ui, "auth");
         String status = str(ui, "status");
         String message = str(ui, "message");
@@ -144,7 +155,17 @@ public class AccountChecker {
                 // Tarih okunamadı, süresiz kabul edilir
             }
         }
-        boolean timeExpired = r.hasExpiry && r.expiresAtMs < System.currentTimeMillis();
+        // Telefonun saati yanlış olabilir: sunucunun kendi saatini (timestamp_now) varsa onu esas al
+        String serverNow = str(serverInfo, "timestamp_now");
+        if (serverNow != null && serverNow.matches("\\d{9,11}")) {
+            try {
+                long offset = Long.parseLong(serverNow) * 1000L - System.currentTimeMillis();
+                if (Math.abs(offset) <= MAX_CLOCK_OFFSET_MS) r.clockOffsetMs = offset;
+            } catch (NumberFormatException ignored) {
+                // Saat okunamadı, telefonun saati kullanılır
+            }
+        }
+        boolean timeExpired = r.hasExpiry && r.expiresAtMs < r.nowMs();
 
         // auth=0: kullanıcı adı/şifre yanlış
         if ("0".equals(auth) || "false".equalsIgnoreCase(auth)) {
@@ -174,7 +195,7 @@ public class AccountChecker {
     private void checkM3uList(Account a, CheckResult r) {
         HttpURLConnection c = null;
         try {
-            c = Http.open(a.original, CONNECT_MS, M3U_READ_MS, active);
+            c = Http.open(m3uUrl(a), CONNECT_MS, M3U_READ_MS, active);
             int code = c.getResponseCode();
             if (code != 200) {
                 r.m3uMessage = "HTTP " + code;
@@ -215,6 +236,15 @@ public class AccountChecker {
     }
 
     // ---------------------------------------------------------------- yardımcılar
+
+    /**
+     * M3U kontrolünde açılacak adres. Link get.php ise aynen kullanılır; player_api.php linki
+     * verildiyse o bir M3U değil JSON döndürür, bu yüzden hesabın get.php adresi kullanılır.
+     */
+    private static String m3uUrl(Account a) {
+        if (a.original.toLowerCase(Locale.ROOT).contains("get.php?")) return a.original;
+        return a.listUrl();
+    }
 
     private static String str(JSONObject o, String key) {
         if (o == null || !o.has(key) || o.isNull(key)) return null;

@@ -35,8 +35,28 @@ public class CheckResult {
     public boolean authFailed;       // Panel "kullanıcı adı/şifre hatalı" dedi (M3U indirilmez)
     public long responseMs;
 
+    /** Sunucu saati - telefon saati (ms). Sunucu saati okunamadıysa 0 (telefon saati kullanılır). */
+    public long clockOffsetMs;
+
     public CheckResult(Account account) {
         this.account = account;
+    }
+
+    /** Şu anki zaman: telefonun saati yanlış olsa bile mümkünse sunucunun saatine göre düzeltilir. */
+    public long nowMs() {
+        return System.currentTimeMillis() + clockOffsetMs;
+    }
+
+    /** Bağlantı hakkı doluysa false: şu an yeni bir cihazda izlenebilir mi? (bilgi yoksa false) */
+    public boolean isFree() {
+        return maxConnections > 0 && activeConnections >= 0 && activeConnections < maxConnections;
+    }
+
+    /** Hesap henüz bitmemiş ve en geç verilen gün sayısı içinde bitecek mi? */
+    public boolean expiresWithin(int days) {
+        if (!hasExpiry) return false;
+        long left = expiresAtMs - nowMs();
+        return left > 0 && left <= days * 86400000L;
     }
 
     public State getState() {
@@ -77,7 +97,7 @@ public class CheckResult {
     /** Kalan gün sayısı (tarih yoksa Integer.MAX_VALUE). */
     public long daysLeft() {
         if (!hasExpiry) return Long.MAX_VALUE;
-        return (expiresAtMs - System.currentTimeMillis()) / 86400000L;
+        return (expiresAtMs - nowMs()) / 86400000L;
     }
 
     /** Karttaki özet satırı: bağlantı, tarih, kanal sayısı, deneme. */
@@ -104,6 +124,10 @@ public class CheckResult {
         if (trial) {
             if (sb.length() > 0) sb.append("  •  ");
             sb.append("🧪 Deneme");
+        }
+        if (apiReachable && responseMs > 0) {
+            if (sb.length() > 0) sb.append("  •  ");
+            sb.append("⚡ ").append(responseMs).append(" ms");
         }
         return sb.toString();
     }

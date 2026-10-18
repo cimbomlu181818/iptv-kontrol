@@ -48,6 +48,7 @@ public class ResultsActivity extends Activity {
 
     private static final int MAX_SHARE_CHARS = 300000;
     private static final int REQ_SAVE = 201;
+    private static final int SOON_DAYS = 7;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<CheckResult> all = new ArrayList<>();
@@ -72,13 +73,16 @@ public class ResultsActivity extends Activity {
     private final Set<String> fYears = new HashSet<>();
     private final Set<String> fMax = new HashSet<>();
     private int fTrial = 0;                     // 0 hepsi, 1 sadece deneme, 2 deneme hariç
-    private int sortMode = 0;                   // 0 geliş sırası, 1 bitiş tarihi, 2 kanal sayısı
+    private boolean fFree = false;              // sadece şu an boş (bağlantı hakkı dolmamış) olanlar
+    private boolean fSoon = false;              // sadece SOON_DAYS gün içinde bitecek olanlar
+    private int sortMode = 0;                   // 0 geliş sırası, 1 bitiş tarihi, 2 kanal sayısı, 3 yanıt süresi
 
     // Ekran parçaları
     private TextView tvSummary, tvCounts, tvTime, tvFilterInfo, tvEmpty;
     private ProgressBar bar;
     private Button btnStop, btnCopy, btnShare, btnRetry, btnSave, btnClean, btnAddList;
     private final TextView[] chips = new TextView[5];
+    private TextView chipFree, chipSoon;
     private ListView listView;
     private RowAdapter adapter;
 
@@ -191,13 +195,14 @@ public class ResultsActivity extends Activity {
         List<Account> redo = new ArrayList<>();
         List<CheckResult> remove = new ArrayList<>();
         for (CheckResult r : all) {
-            if (r.getState() == CheckResult.State.DEAD) {
+            // Kullanıcı adı/şifresi yanlış çıkanlar tekrar denenince değişmez, atlanır
+            if (r.getState() == CheckResult.State.DEAD && !r.authFailed) {
                 redo.add(r.account);
                 remove.add(r);
             }
         }
         if (redo.isEmpty()) {
-            Toast.makeText(this, "Tekrar denenecek pasif link yok", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Tekrar denenecek pasif link yok (şifresi yanlış olanlar hariç)", Toast.LENGTH_SHORT).show();
             return;
         }
         all.removeAll(remove);
@@ -230,19 +235,24 @@ public class ResultsActivity extends Activity {
         }
         if (fTrial == 1 && !r.trial) return false;
         if (fTrial == 2 && r.trial) return false;
+        if (fFree && !r.isFree()) return false;
+        if (fSoon && !r.expiresWithin(SOON_DAYS)) return false;
         return true;
     }
 
     private void refresh() {
         refreshPending = false;
         shown.clear();
-        int full = 0, part = 0, exp = 0, dead = 0;
+        int full = 0, part = 0, exp = 0, dead = 0, retryable = 0;
         for (CheckResult r : all) {
             switch (r.getState()) {
                 case FULL: full++; break;
                 case PARTIAL: part++; break;
                 case EXPIRED: exp++; break;
-                default: dead++; break;
+                default:
+                    dead++;
+                    if (!r.authFailed) retryable++;
+                    break;
             }
             if (matches(r)) shown.add(r);
         }
@@ -262,6 +272,15 @@ public class ResultsActivity extends Activity {
                     return Integer.compare(b.channelCount, a.channelCount);
                 }
             });
+        } else if (sortMode == 3) {
+            Collections.sort(shown, new Comparator<CheckResult>() {
+                @Override
+                public int compare(CheckResult a, CheckResult b) {
+                    long x = a.apiReachable && a.responseMs > 0 ? a.responseMs : Long.MAX_VALUE;
+                    long y = b.apiReachable && b.responseMs > 0 ? b.responseMs : Long.MAX_VALUE;
+                    return Long.compare(x, y);
+                }
+            });
         }
         adapter.notifyDataSetChanged();
 
@@ -277,8 +296,8 @@ public class ResultsActivity extends Activity {
         btnStop.setText(checking ? "⏹ Durdur" : "🔄 Yeniden");
         btnCopy.setText("📋 Kopyala (" + shown.size() + ")");
         btnShare.setText("📤 Paylaş");
-        btnRetry.setEnabled(!checking && dead > 0);
-        btnRetry.setAlpha(!checking && dead > 0 ? 1f : 0.45f);
+        btnRetry.setEnabled(!checking && retryable > 0);
+        btnRetry.setAlpha(!checking && retryable > 0 ? 1f : 0.45f);
         boolean canClean = !checking && (dead + exp) > 0;
         btnClean.setEnabled(canClean);
         btnClean.setAlpha(canClean ? 1f : 0.45f);
@@ -297,6 +316,8 @@ public class ResultsActivity extends Activity {
             tvEmpty.setText(all.isEmpty() ? "İlk sonuçlar bekleniyor…" : "Bu filtreye uyan link yok");
         }
         for (int i = 0; i < chips.length; i++) Ui.setChipSelected(this, chips[i], mode == i);
+        Ui.setChipSelected(this, chipFree, fFree);
+        Ui.setChipSelected(this, chipSoon, fSoon);
     }
 
     private String filterSummary() {
@@ -306,8 +327,11 @@ public class ResultsActivity extends Activity {
         if (!fYears.isEmpty()) parts.add("Yıl: " + fYears.size());
         if (fTrial == 1) parts.add("Sadece deneme");
         if (fTrial == 2) parts.add("Deneme hariç");
+        if (fFree) parts.add("Şu an boş olanlar");
+        if (fSoon) parts.add(SOON_DAYS + " gün içinde bitecek");
         if (sortMode == 1) parts.add("Sıra: bitiş tarihi");
         if (sortMode == 2) parts.add("Sıra: kanal sayısı");
+        if (sortMode == 3) parts.add("Sıra: yanıt süresi");
         if (parts.isEmpty()) return "";
         StringBuilder sb = new StringBuilder("🔍 ");
         for (int i = 0; i < parts.size(); i++) {
@@ -433,6 +457,26 @@ public class ResultsActivity extends Activity {
             }
         });
         row2.addView(panelChip, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
+
+        chipFree = Ui.chip(this, "🟢 Şu an boş olanlar");
+        chipFree.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                fFree = !fFree;
+                refresh();
+            }
+        });
+        row2.addView(chipFree, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
+
+        chipSoon = Ui.chip(this, "⏳ " + SOON_DAYS + " gün içinde bitecek");
+        chipSoon.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                fSoon = !fSoon;
+                refresh();
+            }
+        });
+        row2.addView(chipSoon, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
 
         TextView clearChip = Ui.chip(this, "Tüm filtreleri temizle");
         clearChip.setOnClickListener(new View.OnClickListener() {
@@ -669,7 +713,8 @@ public class ResultsActivity extends Activity {
     }
 
     private void showSortDialog() {
-        final String[] items = {"Geliş sırası", "Bitiş tarihi (en uzun önce)", "Kanal sayısı (çok olan önce)"};
+        final String[] items = {"Geliş sırası", "Bitiş tarihi (en uzun önce)", "Kanal sayısı (çok olan önce)",
+                "Yanıt süresi (hızlı olan önce)"};
         new AlertDialog.Builder(this)
                 .setTitle("Sırala")
                 .setSingleChoiceItems(items, sortMode, new DialogInterface.OnClickListener() {
@@ -688,6 +733,8 @@ public class ResultsActivity extends Activity {
         fYears.clear();
         fMax.clear();
         fTrial = 0;
+        fFree = false;
+        fSoon = false;
         mode = 0;
         sortMode = 0;
         refresh();

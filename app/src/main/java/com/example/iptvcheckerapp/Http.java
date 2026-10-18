@@ -6,6 +6,9 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.Charset;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
 
 /** Küçük HTTP yardımcıları (HttpURLConnection). Android'e bağlı değildir. */
 public final class Http {
@@ -20,10 +23,21 @@ public final class Http {
      * Dönen bağlantının yanıt kodu okunmuştur; işi bitince disconnect() çağrılmalıdır.
      */
     public static HttpURLConnection open(String url, int connectMs, int readMs) throws IOException {
+        return open(url, connectMs, readMs, null);
+    }
+
+    /**
+     * Yukarıdakiyle aynıdır; ayrıca açılan bağlantıyı hemen "track" listesine ekler, böylece başka bir
+     * iş parçacığı disconnectAsync ile bağlantı kurulurken bile işlemi iptal edebilir.
+     * Dönen bağlantı listede kalır; işi bitince çağıran taraf onu listeden çıkarmalıdır.
+     */
+    public static HttpURLConnection open(String url, int connectMs, int readMs,
+                                         Collection<HttpURLConnection> track) throws IOException {
         String current = url;
         for (int redirects = 0; ; redirects++) {
             URL u = new URL(current);
             HttpURLConnection c = (HttpURLConnection) u.openConnection();
+            if (track != null) track.add(c);
             c.setInstanceFollowRedirects(false);
             c.setConnectTimeout(connectMs);
             c.setReadTimeout(readMs);
@@ -33,12 +47,14 @@ public final class Http {
             try {
                 code = c.getResponseCode();
             } catch (IOException e) {
+                if (track != null) track.remove(c);
                 c.disconnect();
                 throw e;
             }
             boolean redirect = code == 301 || code == 302 || code == 303 || code == 307 || code == 308;
             if (redirect && redirects < 5) {
                 String loc = c.getHeaderField("Location");
+                if (track != null) track.remove(c);
                 c.disconnect();
                 if (loc == null || loc.isEmpty()) {
                     throw new IOException("Yönlendirme adresi boş");
@@ -48,6 +64,34 @@ public final class Http {
             }
             return c;
         }
+    }
+
+    /** Bağlantıyı listeden çıkarıp kapatır (null olabilir). */
+    public static void release(HttpURLConnection c, Collection<HttpURLConnection> track) {
+        if (c == null) return;
+        if (track != null) track.remove(c);
+        c.disconnect();
+    }
+
+    /**
+     * Verilen bağlantıları ayrı bir iş parçacığında kapatır. (Ana iş parçacığında ağ bağlantısı
+     * kapatmak bazı Android sürümlerinde hata verebildiği için ayrı iş parçacığı kullanılır.)
+     */
+    public static void disconnectAsync(Collection<HttpURLConnection> track) {
+        final List<HttpURLConnection> copy = new ArrayList<>(track);
+        if (copy.isEmpty()) return;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                for (HttpURLConnection c : copy) {
+                    try {
+                        c.disconnect();
+                    } catch (Exception ignored) {
+                        // zaten kapanmış olabilir
+                    }
+                }
+            }
+        }).start();
     }
 
     /** En fazla maxBytes kadar okur, UTF-8 metin olarak döndürür. */
@@ -69,6 +113,7 @@ public final class Http {
     public static class LimitedInputStream extends InputStream {
         private final InputStream in;
         private long remaining;
+        private long bytesRead = 0;
         private boolean truncated = false;
 
         public LimitedInputStream(InputStream in, long limit) {
@@ -80,6 +125,11 @@ public final class Http {
             return truncated;
         }
 
+        /** Şu ana kadar okunan bayt sayısı (indirme yüzdesi için). */
+        public long bytesRead() {
+            return bytesRead;
+        }
+
         @Override
         public int read() throws IOException {
             if (remaining <= 0) {
@@ -87,7 +137,10 @@ public final class Http {
                 return -1;
             }
             int b = in.read();
-            if (b >= 0) remaining--;
+            if (b >= 0) {
+                remaining--;
+                bytesRead++;
+            }
             return b;
         }
 
@@ -98,7 +151,10 @@ public final class Http {
                 return -1;
             }
             int n = in.read(b, off, (int) Math.min(len, remaining));
-            if (n > 0) remaining -= n;
+            if (n > 0) {
+                remaining -= n;
+                bytesRead += n;
+            }
             return n;
         }
 

@@ -236,6 +236,7 @@ public class MainActivity extends Activity {
             public void onClick(View v) {
                 etLinks.setText("");
                 fileAccounts.clear();
+                saveFileLinks("");
                 tvFile.setVisibility(View.GONE);
                 deselected.clear();
                 reparse();
@@ -452,6 +453,7 @@ public class MainActivity extends Activity {
                         public void run() {
                             fileAccounts.clear();
                             fileAccounts.addAll(found);
+                            saveFileLinks(name);
                             tvFile.setText("📄 " + name + "  —  " + found.size() + " link");
                             if (found.isEmpty()) {
                                 Toast.makeText(MainActivity.this, "Bu dosyada geçerli link bulunamadı", Toast.LENGTH_LONG).show();
@@ -523,6 +525,34 @@ public class MainActivity extends Activity {
         sbThreads.setProgress(Math.max(0, Math.min(19, p.getInt("threads", 8) - 1)));
         cbM3u.setChecked(p.getBoolean("m3u", true));
         updateThreadsText();
+
+        // Dosyadan okunan linkler de uygulama kapanınca kaybolmasın
+        String fileText = p.getString("fileLinks", "");
+        if (fileText != null && !fileText.isEmpty()) {
+            List<Account> saved = LinkParser.extract(fileText);
+            if (!saved.isEmpty()) {
+                fileAccounts.addAll(saved);
+                String label = p.getString("fileName", "dosya");
+                tvFile.setVisibility(View.VISIBLE);
+                tvFile.setText("📄 " + label + "  —  " + saved.size() + " link");
+            }
+        }
+    }
+
+    /** Dosyadan okunan linkleri kaydeder (boş isim = temizle). */
+    private void saveFileLinks(String fileName) {
+        SharedPreferences.Editor ed = getSharedPreferences(PREFS, MODE_PRIVATE).edit();
+        if (fileName.isEmpty() || fileAccounts.isEmpty()) {
+            ed.remove("fileLinks").remove("fileName");
+        } else {
+            StringBuilder sb = new StringBuilder();
+            for (Account a : fileAccounts) {
+                if (sb.length() + a.original.length() + 1 > MAX_SAVED_CHARS) break;
+                sb.append(a.original).append('\n');
+            }
+            ed.putString("fileLinks", sb.toString()).putString("fileName", fileName);
+        }
+        ed.apply();
     }
 
     @Override

@@ -7,6 +7,7 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.net.Uri;
 import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
@@ -28,9 +29,12 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.OutputStream;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -43,6 +47,7 @@ import java.util.concurrent.Executors;
 public class ResultsActivity extends Activity {
 
     private static final int MAX_SHARE_CHARS = 300000;
+    private static final int REQ_SAVE = 201;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<CheckResult> all = new ArrayList<>();
@@ -50,6 +55,8 @@ public class ResultsActivity extends Activity {
     private final Set<CheckResult> expanded = new HashSet<>();
 
     private ExecutorService pool;
+    private AccountChecker checker;
+    private String pendingSave;
     private int generation = 0;
     private boolean checking = false;
     private boolean refreshPending = false;
@@ -70,7 +77,7 @@ public class ResultsActivity extends Activity {
     // Ekran parçaları
     private TextView tvSummary, tvCounts, tvTime, tvFilterInfo, tvEmpty;
     private ProgressBar bar;
-    private Button btnStop, btnCopy, btnShare, btnRetry;
+    private Button btnStop, btnCopy, btnShare, btnRetry, btnSave, btnClean;
     private final TextView[] chips = new TextView[5];
     private ListView listView;
     private RowAdapter adapter;
@@ -98,6 +105,7 @@ public class ResultsActivity extends Activity {
     protected void onDestroy() {
         super.onDestroy();
         generation++;
+        if (checker != null) checker.cancel();
         if (pool != null) pool.shutdownNow();
         handler.removeCallbacks(refreshTask);
     }
@@ -107,6 +115,7 @@ public class ResultsActivity extends Activity {
     private void run(List<Account> list) {
         generation++;
         final int gen = generation;
+        if (checker != null) checker.cancel();
         if (pool != null) pool.shutdownNow();
 
         total = all.size() + list.size();
@@ -116,6 +125,7 @@ public class ResultsActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         final AccountChecker checker = new AccountChecker(Session.checkM3u);
+        this.checker = checker;
         int threads = Math.max(1, Math.min(Session.threads, list.size()));
         pool = Executors.newFixedThreadPool(threads);
         for (final Account account : list) {
@@ -162,6 +172,7 @@ public class ResultsActivity extends Activity {
 
     private void stopChecking() {
         generation++;                // durdurulmadan önce başlamış kontrollerin geç gelen sonuçları yok sayılır
+        if (checker != null) checker.cancel();       // açık bağlantıları hemen kapatır
         if (pool != null) pool.shutdownNow();
         checking = false;
         endMs = System.currentTimeMillis();
@@ -209,14 +220,13 @@ public class ResultsActivity extends Activity {
         if (mode == 3 && s != CheckResult.State.DEAD) return false;
         if (mode == 4 && s != CheckResult.State.EXPIRED) return false;
         if (!query.isEmpty()) {
-            String hay = (r.account.username + " " + r.account.panelKey()).toLowerCase(Locale.ROOT);
+            String hay = TextUtil.norm(r.account.username + " " + r.account.panelKey());
             if (!hay.contains(query)) return false;
         }
         if (!fPanels.isEmpty() && !fPanels.contains(r.account.panelKey())) return false;
         if (!fMax.isEmpty() && !fMax.contains(String.valueOf(r.maxConnections))) return false;
         if (!fYears.isEmpty()) {
-            String y = r.expiryYear();
-            if (!fYears.contains(y == null ? "Süresiz" : y)) return false;
+            if (!fYears.contains(yearLabel(r))) return false;
         }
         if (fTrial == 1 && !r.trial) return false;
         if (fTrial == 2 && r.trial) return false;
@@ -269,6 +279,11 @@ public class ResultsActivity extends Activity {
         btnShare.setText("📤 Paylaş");
         btnRetry.setEnabled(!checking && dead > 0);
         btnRetry.setAlpha(!checking && dead > 0 ? 1f : 0.45f);
+        boolean canClean = !checking && (dead + exp) > 0;
+        btnClean.setEnabled(canClean);
+        btnClean.setAlpha(canClean ? 1f : 0.45f);
+        btnSave.setEnabled(!shown.isEmpty());
+        btnSave.setAlpha(shown.isEmpty() ? 0.45f : 1f);
 
         String fi = filterSummary();
         tvFilterInfo.setVisibility(fi.isEmpty() ? View.GONE : View.VISIBLE);
@@ -357,6 +372,23 @@ public class ResultsActivity extends Activity {
         hs.setHorizontalScrollBarEnabled(false);
         LinearLayout chipRow = new LinearLayout(this);
         chipRow.setOrientation(LinearLayout.HORIZONTAL);
+        // Sıra: Sırala - Filtre - Hepsi - Tam aktif - Kısmi - Pasif - Süresi dolmuş
+        TextView sortChip = Ui.chip(this, "↕ Sırala");
+        sortChip.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showSortDialog();
+            }
+        });
+        chipRow.addView(sortChip, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
+        TextView filterChip = Ui.chip(this, "⚙ Filtre");
+        filterChip.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showFilterMenu();
+            }
+        });
+        chipRow.addView(filterChip, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
         String[] names = {"Hepsi", "✅ Tam aktif", "⚠️ Kısmi", "❌ Pasif", "⌛ Süresi dolmuş"};
         for (int i = 0; i < names.length; i++) {
             final int idx = i;
@@ -371,22 +403,6 @@ public class ResultsActivity extends Activity {
             chips[i] = chip;
             chipRow.addView(chip, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
         }
-        TextView filterChip = Ui.chip(this, "⚙ Filtre");
-        filterChip.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                showFilterMenu();
-            }
-        });
-        chipRow.addView(filterChip, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
-        TextView sortChip = Ui.chip(this, "↕ Sırala");
-        sortChip.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                showSortDialog();
-            }
-        });
-        chipRow.addView(sortChip);
         hs.addView(chipRow);
         root.addView(hs, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
 
@@ -409,7 +425,7 @@ public class ResultsActivity extends Activity {
 
             @Override
             public void afterTextChanged(Editable s) {
-                query = s.toString().trim().toLowerCase(Locale.ROOT);
+                query = TextUtil.norm(s.toString().trim());
                 refresh();
             }
         });
@@ -449,7 +465,29 @@ public class ResultsActivity extends Activity {
         actions.addView(btnCopy, Ui.weight(this, 0, 3));
         actions.addView(btnShare, Ui.weight(this, 3, 3));
         actions.addView(btnRetry, Ui.weight(this, 3, 0));
-        root.addView(actions, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 4));
+        root.addView(actions, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 6));
+
+        LinearLayout actions2 = new LinearLayout(this);
+        actions2.setOrientation(LinearLayout.HORIZONTAL);
+        btnSave = Ui.button(this, "💾 Dosyaya kaydet", Ui.WHITE, Ui.TEXT);
+        btnClean = Ui.button(this, "🧹 Çalışmayanları sil", Ui.WHITE, Ui.RED);
+        btnSave.setTextSize(12);
+        btnClean.setTextSize(12);
+        btnSave.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                saveShown();
+            }
+        });
+        btnClean.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                deleteBroken();
+            }
+        });
+        actions2.addView(btnSave, Ui.weight(this, 0, 3));
+        actions2.addView(btnClean, Ui.weight(this, 3, 0));
+        root.addView(actions2, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 4));
 
         // Liste
         android.widget.FrameLayout listFrame = new android.widget.FrameLayout(this);
@@ -514,17 +552,17 @@ public class ResultsActivity extends Activity {
         return out;
     }
 
+    /** Bitiş yılı etiketi: tarih yoksa hesap aktifse "Süresiz", değilse "Bilinmiyor". */
+    private static String yearLabel(CheckResult r) {
+        String y = r.expiryYear();
+        if (y != null) return y;
+        return r.apiOk ? "Süresiz" : "Bilinmiyor";
+    }
+
     private List<String> yearOptions() {
         TreeSet<String> set = new TreeSet<>();
-        boolean unlimited = false;
-        for (CheckResult r : all) {
-            String y = r.expiryYear();
-            if (y != null) set.add(y);
-            else if (r.apiOk) unlimited = true;
-        }
-        List<String> out = new ArrayList<>(set);
-        if (unlimited) out.add("Süresiz");
-        return out;
+        for (CheckResult r : all) set.add(yearLabel(r));
+        return new ArrayList<>(set);
     }
 
     private void pickMulti(String title, final List<String> options, final Set<String> selected) {
@@ -639,6 +677,96 @@ public class ResultsActivity extends Activity {
         i.setType("text/plain");
         i.putExtra(Intent.EXTRA_TEXT, text);
         startActivity(Intent.createChooser(i, "Linkleri paylaş"));
+    }
+
+    // ------------------------------------------------------------------ dosyaya kaydet / temizle
+
+    private void saveShown() {
+        if (shown.isEmpty()) {
+            Toast.makeText(this, "Kaydedilecek link yok", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        pendingSave = shownLinks();
+        String stamp = new SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(new Date());
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("text/plain");
+        i.putExtra(Intent.EXTRA_TITLE, "iptv_linkler_" + stamp + ".txt");
+        try {
+            startActivityForResult(i, REQ_SAVE);
+        } catch (Exception e) {
+            pendingSave = null;
+            Toast.makeText(this, "Dosya kaydetme ekranı açılamadı", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_SAVE) return;
+        final String text = pendingSave;
+        pendingSave = null;
+        if (resultCode != RESULT_OK || data == null || data.getData() == null || text == null) return;
+        final Uri uri = data.getData();
+        final int count = text.isEmpty() ? 0 : text.split("\n").length;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String error = null;
+                try {
+                    OutputStream out = getContentResolver().openOutputStream(uri, "wt");
+                    if (out == null) throw new java.io.IOException("Dosya açılamadı");
+                    try {
+                        out.write(text.getBytes("UTF-8"));
+                    } finally {
+                        out.close();
+                    }
+                } catch (Exception e) {
+                    error = e.getMessage() == null ? "bilinmeyen hata" : e.getMessage();
+                }
+                final String msg = error == null ? count + " link dosyaya kaydedildi" : "Kaydedilemedi: " + error;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        Toast.makeText(ResultsActivity.this, msg, Toast.LENGTH_LONG).show();
+                    }
+                });
+            }
+        }).start();
+    }
+
+    /** Pasif ve süresi dolmuş sonuçları bu listeden siler (onay ister). */
+    private void deleteBroken() {
+        if (checking) {
+            Toast.makeText(this, "Kontrol bitince silebilirsin", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final Set<CheckResult> remove = new HashSet<>();
+        for (CheckResult r : all) if (!r.isUsable()) remove.add(r);
+        if (remove.isEmpty()) {
+            Toast.makeText(this, "Silinecek link yok", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Çalışmayanları sil")
+                .setMessage(remove.size() + " pasif ya da süresi dolmuş link bu sonuç listesinden silinsin mi?\n\n"
+                        + "Ana ekrandaki link kutusuna dokunulmaz.")
+                .setPositiveButton("Sil", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int w) {
+                        Set<Account> gone = new HashSet<>();
+                        for (CheckResult r : remove) gone.add(r.account);
+                        all.removeAll(remove);
+                        expanded.removeAll(remove);
+                        Session.accounts.removeAll(gone);       // "Yeniden" silinenleri geri getirmesin
+                        total = Math.max(0, total - remove.size());
+                        done = Math.max(0, done - remove.size());
+                        refresh();
+                        Toast.makeText(ResultsActivity.this, remove.size() + " link silindi", Toast.LENGTH_SHORT).show();
+                    }
+                })
+                .setNegativeButton("İptal", null)
+                .show();
     }
 
     // ------------------------------------------------------------------ liste

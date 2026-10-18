@@ -46,6 +46,15 @@ public class Account {
         return baseUrl() + pathPrefix + "/player_api.php?username=" + username + "&password=" + password;
     }
 
+    /**
+     * Kanal listesi (M3U) adresi. Link type=m3u ise sunucu kategori (group-title) bilgisini
+     * göndermez ve her şey "GENEL" altında toplanır; bu yüzden her zaman m3u_plus istenir.
+     */
+    public String listUrl() {
+        return baseUrl() + pathPrefix + "/get.php?username=" + username + "&password=" + password
+                + "&type=m3u_plus&output=ts";
+    }
+
     /** Aynı hesabı tekrar saymamak için anahtar. */
     public String dedupeKey() {
         return host + ":" + effectivePort() + "|" + username + "|" + password;

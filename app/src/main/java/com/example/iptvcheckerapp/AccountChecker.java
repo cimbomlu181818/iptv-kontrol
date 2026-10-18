@@ -33,6 +33,9 @@ public class AccountChecker {
     private static final int DEAD_HOST_LIMIT = 2;
 
     private final boolean checkM3u;
+    // Şu anda açık olan bağlantılar: Durdur'a basılınca hemen kapatılır
+    private final Set<HttpURLConnection> active = ConcurrentHashMap.newKeySet();
+    private volatile boolean cancelled = false;
     // Bu oturumda üst üste bağlantı kurulamayan paneller (aynı panele tekrar tekrar zaman kaybetmemek için)
     private final Set<String> deadHosts = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, AtomicInteger> failures = new ConcurrentHashMap<>();
@@ -41,8 +44,15 @@ public class AccountChecker {
         this.checkM3u = checkM3u;
     }
 
+    /** Devam eden tüm kontrolleri iptal eder; açık bağlantılar kapatılır (bekleme süresi kalmaz). */
+    public void cancel() {
+        cancelled = true;
+        Http.disconnectAsync(active);
+    }
+
     public CheckResult check(Account a) {
         CheckResult r = new CheckResult(a);
+        if (cancelled) return r;
         String panel = a.panelKey();
 
         if (deadHosts.contains(panel)) {
@@ -53,6 +63,7 @@ public class AccountChecker {
         }
 
         checkApi(a, r);
+        if (cancelled) return r;
 
         if (r.hostUnreachable) {
             AtomicInteger n = failures.get(panel);
@@ -80,7 +91,7 @@ public class AccountChecker {
         HttpURLConnection c = null;
         long t0 = System.currentTimeMillis();
         try {
-            c = Http.open(a.apiUrl(), CONNECT_MS, API_READ_MS);
+            c = Http.open(a.apiUrl(), CONNECT_MS, API_READ_MS, active);
             int code = c.getResponseCode();
             r.apiReachable = true;
             r.responseMs = System.currentTimeMillis() - t0;
@@ -107,7 +118,7 @@ public class AccountChecker {
             r.hostUnreachable = isUnreachable(e);
             r.apiReachable = false;
         } finally {
-            if (c != null) c.disconnect();
+            Http.release(c, active);
         }
     }
 
@@ -163,7 +174,7 @@ public class AccountChecker {
     private void checkM3uList(Account a, CheckResult r) {
         HttpURLConnection c = null;
         try {
-            c = Http.open(a.original, CONNECT_MS, M3U_READ_MS);
+            c = Http.open(a.original, CONNECT_MS, M3U_READ_MS, active);
             int code = c.getResponseCode();
             if (code != 200) {
                 r.m3uMessage = "HTTP " + code;
@@ -199,7 +210,7 @@ public class AccountChecker {
         } catch (IOException e) {
             r.m3uMessage = describe(e);
         } finally {
-            if (c != null) c.disconnect();
+            Http.release(c, active);
         }
     }
 

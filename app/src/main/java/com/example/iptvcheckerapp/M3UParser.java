@@ -6,12 +6,10 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -24,6 +22,8 @@ public final class M3UParser {
     public static final String MOVIES = "FİLMLER";
     public static final String SERIES = "DİZİLER";
     public static final String OTHER = "DİĞER";
+    /** Kategori bilgisi olmayan kanalların toplandığı kategori adı. */
+    public static final String GENERAL = "GENEL";
 
     /** Bellek korumak için okunacak en fazla kanal sayısı; aşılırsa liste "kısmen gösteriliyor" sayılır. */
     public static final int MAX_CHANNELS = 250000;
@@ -36,7 +36,6 @@ public final class M3UParser {
     public static class Category {
         public final String name;
         public final List<String> channels = new ArrayList<>();
-        private final Set<String> seen = new HashSet<>();
 
         Category(String name) {
             this.name = name;
@@ -64,19 +63,111 @@ public final class M3UParser {
         public int channelCount;
         public int categoryCount;
         public boolean truncated;
+        /** true ise liste M3U'dan değil, panelin API'sinden (player_api.php) oluşturulmuştur. */
+        public boolean fromApi;
+    }
+
+    /** İndirme ilerlemesi için geri çağırım (arka plan iş parçacığından çağrılır). */
+    public interface Progress {
+        void onProgress(long bytes, int channels);
+    }
+
+    /** Ana grup > Kategori > Kanal yapısını adım adım kurar (M3U ve API aynı yapıyı kullanır). */
+    public static final class Builder {
+        private final Map<String, Group> groups = new LinkedHashMap<>();
+        private int count;
+
+        private Group group(String main) {
+            Group g = groups.get(main);
+            if (g == null) {
+                g = new Group(main);
+                groups.put(main, g);
+            }
+            return g;
+        }
+
+        private Category category(String main, String cat) {
+            Group g = group(main);
+            Category c = g.index.get(cat);
+            if (c == null) {
+                c = new Category(cat);
+                g.index.put(cat, c);
+                g.categories.add(c);
+            }
+            return c;
+        }
+
+        /** Kanalı olmasa bile kategoriyi oluşturur (API'deki boş kategoriler için). */
+        public void declare(String main, String cat) {
+            category(main, cat);
+        }
+
+        /** Kanalı ekler. Kanal sınırına ulaşıldıysa false döner (okumayı bırakmak gerekir). */
+        public boolean add(String main, String cat, String name) {
+            category(main, cat).channels.add(name);
+            count++;
+            return count < MAX_CHANNELS;
+        }
+
+        public int count() {
+            return count;
+        }
+
+        public boolean isFull() {
+            return count >= MAX_CHANNELS;
+        }
+
+        public Result build(boolean truncated) {
+            Result result = new Result();
+            result.truncated = truncated || isFull();
+            String[] order = {LIVE, MOVIES, SERIES, OTHER};
+            for (String key : order) {
+                Group g = groups.get(key);
+                if (g == null) continue;
+                if (key.equals(LIVE)) turkishFirst(g);
+                result.groups.add(g);
+                result.categoryCount += g.categories.size();
+                result.channelCount += g.channelCount();
+            }
+            return result;
+        }
+    }
+
+    /**
+     * Liste "kategorisiz" mi? (Her ana grubun tek kategorisi "GENEL" ise: sunucu group-title
+     * bilgisini göndermemiştir, örneğin linkte type=m3u olduğunda.)
+     */
+    public static boolean isUncategorized(Result r) {
+        if (r == null || r.groups.isEmpty()) return false;
+        for (Group g : r.groups) {
+            if (g.categories.size() != 1 || !GENERAL.equals(g.categories.get(0).name)) return false;
+        }
+        return true;
     }
 
     public static Result parse(InputStream in, long maxBytes) throws IOException {
+        return parse(in, maxBytes, null);
+    }
+
+    public static Result parse(InputStream in, long maxBytes, Progress progress) throws IOException {
         Http.LimitedInputStream limited = new Http.LimitedInputStream(in, maxBytes);
         BufferedReader br = new BufferedReader(new InputStreamReader(limited, "UTF-8"), 64 * 1024);
-        Map<String, Group> groups = new LinkedHashMap<>();
+        Builder builder = new Builder();
         String pendingName = null;
         String pendingCategory = null;
         String extGrp = null;
-        int total = 0;
         boolean capped = false;
+        int lines = 0;
+        long lastNotify = System.nanoTime();
         String line;
         while ((line = br.readLine()) != null) {
+            if (progress != null && (++lines & 255) == 0) {
+                long now = System.nanoTime();
+                if (now - lastNotify > 100000000L) {          // en fazla 0,1 saniyede bir haber ver
+                    lastNotify = now;
+                    progress.onProgress(limited.bytesRead(), builder.count());
+                }
+            }
             line = line.trim();
             if (line.isEmpty()) continue;
             if (line.startsWith("#EXTINF")) {
@@ -89,43 +180,19 @@ public final class M3UParser {
                 if (pendingName == null) continue;
                 String cat = pendingCategory;
                 if (cat == null || cat.isEmpty()) cat = extGrp;
-                if (cat == null || cat.isEmpty()) cat = "GENEL";
-                String main = mainGroupOf(line);
-                Group group = groups.get(main);
-                if (group == null) {
-                    group = new Group(main);
-                    groups.put(main, group);
-                }
-                Category category = group.index.get(cat);
-                if (category == null) {
-                    category = new Category(cat);
-                    group.index.put(cat, category);
-                    group.categories.add(category);
-                }
-                boolean added = category.seen.add(pendingName);
-                if (added) category.channels.add(pendingName);
+                if (cat == null || cat.isEmpty()) cat = GENERAL;
+                boolean room = builder.add(mainGroupOf(line), cat, pendingName);
                 pendingName = null;
                 pendingCategory = null;
                 extGrp = null;
-                if (added && ++total >= MAX_CHANNELS) {
+                if (!room) {
                     capped = true;
                     break;
                 }
             }
         }
-
-        Result result = new Result();
-        result.truncated = limited.wasTruncated() || capped;
-        String[] order = {LIVE, MOVIES, SERIES, OTHER};
-        for (String key : order) {
-            Group g = groups.get(key);
-            if (g == null) continue;
-            if (key.equals(LIVE)) turkishFirst(g);
-            result.groups.add(g);
-            result.categoryCount += g.categories.size();
-            result.channelCount += g.channelCount();
-        }
-        return result;
+        if (progress != null) progress.onProgress(limited.bytesRead(), builder.count());
+        return builder.build(limited.wasTruncated() || capped);
     }
 
     static String nameOf(String extinf) {

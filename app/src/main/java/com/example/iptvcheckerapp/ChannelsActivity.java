@@ -1,8 +1,12 @@
 package com.example.iptvcheckerapp;
 
+import android.animation.ObjectAnimator;
+import android.animation.PropertyValuesHolder;
+import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.content.Context;
+import android.content.DialogInterface;
+import android.content.res.ColorStateList;
 import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
@@ -22,18 +26,29 @@ import android.widget.ExpandableListView;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ListView;
+import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.IOException;
 import java.net.HttpURLConnection;
+import java.text.Collator;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Bir panelin kanal listesini Ana grup > Kategori > Kanal biçiminde gösterir ve arama yapar. */
+/**
+ * Bir panelin kanal listesini Ana grup > Kategori > Kanal biçiminde gösterir ve arama yapar.
+ * Liste inerken animasyonlu bir ilerleme kartı gösterilir (sunucu dosya boyutunu bildiriyorsa yüzde ile).
+ */
 public class ChannelsActivity extends Activity {
 
     private static final int MAX_TRIES = 20;
@@ -46,18 +61,48 @@ public class ChannelsActivity extends Activity {
         String channel;     // null ise kategori eşleşmesidir
     }
 
+    /** Bir hesabı deneme sonucu: liste ya da neden alınamadığı. */
+    private static class Attempt {
+        M3UParser.Result result;
+        String reason = "Liste alınamadı";
+        boolean oom;
+    }
+
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private final ExecutorService searchIo = Executors.newSingleThreadExecutor();
     private volatile boolean cancelled = false;
+    // Açık bağlantılar: ekrandan çıkınca hemen kapatılır
+    private final Set<HttpURLConnection> active = ConcurrentHashMap.newKeySet();
+    private volatile AccountChecker reasonChecker;
 
+    // Ekran parçaları
     private TextView tvStatus;
     private EditText etSearch;
     private ExpandableListView expandable;
     private ListView resultsList;
+    private LinearLayout chipRow;
+    private TextView chipSort, chipEmpty;
+
+    // İndirme kartı
+    private LinearLayout progressCard;
+    private TextView tvPulse, tvPercent, tvStage, tvDetail;
+    private ProgressBar bar;
+    private ObjectAnimator pulse;
+
+    // Veri
     private M3UParser.Result data;
+    private String summaryText = "";
+    private final List<List<M3UParser.Category>> view = new ArrayList<>();
+    private GroupsAdapter groupsAdapter;
+    private int sortMode = 0;               // 0 varsayılan (Türkçe önce), 1 A-Z, 2 kanal sayısı
+    private boolean hideEmpty = false;
+
+    // Arama
     private final List<Hit> hits = new ArrayList<>();
     private ArrayAdapter<String> hitsAdapter;
     private final List<String> hitLabels = new ArrayList<>();
+    private volatile int searchSeq = 0;
 
     private final Runnable searchTask = new Runnable() {
         @Override
@@ -77,6 +122,7 @@ public class ChannelsActivity extends Activity {
             return;
         }
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        startPulse();
         load(list);
     }
 
@@ -84,7 +130,12 @@ public class ChannelsActivity extends Activity {
     protected void onDestroy() {
         super.onDestroy();
         cancelled = true;
+        stopPulse();
+        Http.disconnectAsync(active);
+        AccountChecker rc = reasonChecker;
+        if (rc != null) rc.cancel();
         io.shutdownNow();
+        searchIo.shutdownNow();
         handler.removeCallbacks(searchTask);
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
@@ -106,115 +157,443 @@ public class ChannelsActivity extends Activity {
         io.execute(new Runnable() {
             @Override
             public void run() {
+                // Başarısızlık nedenleri (aynı neden tekrar ederse sayılır)
+                Map<String, Integer> reasons = new LinkedHashMap<>();
+                int tried = 0;
                 for (int i = 0; i < max && !cancelled; i++) {
                     final Account a = list.get(i);
                     final int index = i + 1;
-                    handler.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            tvStatus.setText("⏳ " + index + "/" + max + " deneniyor: " + a.panelKey());
-                        }
-                    });
-                    HttpURLConnection c = null;
-                    try {
-                        c = Http.open(a.original, 8000, 15000);
-                        if (c.getResponseCode() != 200) continue;
-                        final M3UParser.Result r = M3UParser.parse(c.getInputStream(), MAX_BYTES);
-                        if (r.channelCount > 0) {
-                            final String panel = a.panelKey();
-                            handler.post(new Runnable() {
-                                @Override
-                                public void run() {
-                                    show(r, panel);
-                                }
-                            });
-                            return;
-                        }
-                    } catch (IOException e) {
-                        // Bu link olmadı, sıradakini dene
-                    } catch (OutOfMemoryError e) {
-                        // Liste telefonun belleğine sığmadı: çökmek yerine açıklama göster
-                        if (!cancelled) {
-                            handler.post(new Runnable() {
-                                @Override
-                                public void run() {
-                                    tvStatus.setText("❌ Liste çok büyük, telefonun belleği yetmedi");
-                                }
-                            });
-                        }
+                    tried++;
+                    postStart(a.panelKey(), index, max);
+                    Attempt at = tryAccount(a);
+                    if (cancelled) return;
+                    if (at.result != null) {
+                        final M3UParser.Result r = at.result;
+                        final String panel = a.panelKey();
+                        handler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                show(r, panel);
+                            }
+                        });
                         return;
-                    } finally {
-                        if (c != null) c.disconnect();
                     }
+                    if (at.oom) {
+                        postFail("❌ Liste çok büyük, telefonun belleği yetmedi");
+                        return;
+                    }
+                    Integer n = reasons.get(at.reason);
+                    reasons.put(at.reason, n == null ? 1 : n + 1);
                 }
-                if (!cancelled) {
-                    handler.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            tvStatus.setText("❌ Çalışan bir kanal listesi bulunamadı");
-                        }
-                    });
+                if (cancelled) return;
+                postFail(buildFailMessage(reasons, tried, list.size()));
+            }
+        });
+    }
+
+    private String buildFailMessage(Map<String, Integer> reasons, int tried, int totalLinks) {
+        if (tried <= 1 && reasons.size() == 1) {
+            return "❌ Kanal listesi alınamadı: " + reasons.keySet().iterator().next();
+        }
+        StringBuilder sb = new StringBuilder("❌ Kanal listesi alınamadı (" + tried + " hesap denendi");
+        if (totalLinks > tried) sb.append(", ").append(totalLinks).append(" linkin ilk ").append(tried).append("'i");
+        sb.append(")");
+        int shown = 0;
+        for (Map.Entry<String, Integer> e : reasons.entrySet()) {
+            if (shown++ >= 4) break;
+            sb.append("\n• ").append(e.getKey());
+            if (e.getValue() > 1) sb.append("  ×").append(e.getValue());
+        }
+        return sb.toString();
+    }
+
+    /** Tek bir hesabı dener: önce M3U (kategorili), gerekirse panel API'si, olmazsa nedenini bulur. */
+    private Attempt tryAccount(final Account a) {
+        final Attempt at = new Attempt();
+        M3UParser.Result best = null;
+        boolean unreachable = false;
+
+        // Önce kategorili (m3u_plus) liste, olmazsa linkin kendi hali denenir
+        String[] urls = a.listUrl().equals(a.original)
+                ? new String[]{a.original}
+                : new String[]{a.listUrl(), a.original};
+        for (String url : urls) {
+            if (cancelled) return at;
+            HttpURLConnection c = null;
+            try {
+                c = Http.open(url, 8000, 20000, active);
+                int code = c.getResponseCode();
+                if (code != 200) {
+                    at.reason = "Sunucu HTTP " + code + " yanıtı verdi";
+                    continue;
+                }
+                final long len = c.getContentLengthLong();
+                postDownloadStage("📥 Kanal listesi indiriliyor");
+                M3UParser.Result r = M3UParser.parse(c.getInputStream(), MAX_BYTES, new M3UParser.Progress() {
+                    @Override
+                    public void onProgress(long bytes, int channels) {
+                        postDownload(bytes, len, channels);
+                    }
+                });
+                if (r.channelCount > 0) {
+                    best = r;
+                    break;
+                }
+                at.reason = "Liste boş geldi";
+            } catch (IOException e) {
+                if (cancelled) return at;
+                at.reason = AccountChecker.describe(e);
+                if (AccountChecker.isUnreachable(e)) {
+                    unreachable = true;
+                    break;
+                }
+            } catch (OutOfMemoryError e) {
+                at.oom = true;
+                return at;
+            } finally {
+                Http.release(c, active);
+            }
+        }
+
+        // Liste kategorisizse ya da hiç alınamadıysa panelin API'sinden kategorili liste kur
+        boolean needApi = !unreachable && (best == null || M3UParser.isUncategorized(best));
+        if (needApi && !cancelled) {
+            postApiStage();
+            try {
+                M3UParser.Result api = ApiCatalog.load(a, active, new ApiCatalog.Control() {
+                    @Override
+                    public boolean cancelled() {
+                        return cancelled;
+                    }
+                }, new ApiCatalog.Progress() {
+                    @Override
+                    public void onProgress(int step, int steps, String label, long bytes, long total, int channels) {
+                        postApiProgress(step, steps, label, bytes, total, channels);
+                    }
+                });
+                if (api.channelCount > 0 && (best == null || !M3UParser.isUncategorized(api))) best = api;
+            } catch (IOException e) {
+                if (cancelled) return at;
+                if (best == null) {
+                    at.reason = AccountChecker.describe(e);
+                    unreachable = AccountChecker.isUnreachable(e);
+                }
+            } catch (OutOfMemoryError e) {
+                if (best == null) {
+                    at.oom = true;
+                    return at;
+                }
+            }
+        }
+
+        if (best != null) {
+            at.result = best;
+            return at;
+        }
+
+        // Neden alınamadığını hesabın durumundan öğren (yanlış şifre, süresi dolmuş, kapalı...)
+        if (!unreachable && !cancelled) {
+            postStage("🔎 Hesap durumu kontrol ediliyor");
+            AccountChecker checker = new AccountChecker(false);
+            reasonChecker = checker;
+            CheckResult cr = checker.check(a);
+            if (cancelled) return at;
+            if (!cr.apiOk && cr.apiMessage != null && !cr.apiMessage.isEmpty()) {
+                at.reason = cr.apiMessage;
+            } else if (cr.apiOk) {
+                at.reason = "Hesap aktif ama panel kanal listesi vermiyor";
+            }
+        }
+        return at;
+    }
+
+    // ------------------------------------------------------------------ indirme kartı (arayüz iş parçacığı)
+
+    private void postStart(final String panel, final int index, final int max) {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                tvStatus.setText("⏳ " + index + "/" + max + " deneniyor: " + panel);
+                tvStage.setText("🔌 Sunucuya bağlanılıyor…");
+                tvDetail.setText(panel);
+                setProgress(-1, "…");
+            }
+        });
+    }
+
+    private void postStage(final String stage) {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                tvStage.setText(stage);
+            }
+        });
+    }
+
+    private void postDownloadStage(final String stage) {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                tvStage.setText(stage);
+                setProgress(-1, "0 KB");
+            }
+        });
+    }
+
+    /** İndirme durumu: dosya boyutu biliniyorsa yüzde, bilinmiyorsa indirilen miktar gösterilir. */
+    private void postDownload(final long bytes, final long total, final int channels) {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (data != null) return;
+                if (total > 0) {
+                    int permille = (int) Math.min(1000L, bytes * 1000L / total);
+                    setProgress(permille, "%" + Math.min(100, permille / 10));
+                    tvDetail.setText(formatSize(bytes) + " / " + formatSize(total) + "   •   " + channels + " kanal bulundu");
+                } else {
+                    setProgress(-1, formatSize(bytes));
+                    tvDetail.setText("Sunucu dosya boyutunu bildirmedi   •   " + channels + " kanal bulundu");
                 }
             }
         });
+    }
+
+    private void postApiStage() {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                tvStage.setText("🗂 Kategoriler panelin API'sinden alınıyor");
+                setProgress(0, "%0");
+            }
+        });
+    }
+
+    private void postApiProgress(final int step, final int steps, final String label,
+                                 final long bytes, final long total, final int channels) {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (data != null) return;
+                float within = total > 0 ? Math.min(1f, (float) bytes / total) : 0f;
+                int permille = (int) (((step - 1) + within) / steps * 1000f);
+                permille = Math.max(0, Math.min(1000, permille));
+                setProgress(permille, "%" + (permille / 10));
+                tvStage.setText("🗂 Kategoriler API'den alınıyor  •  adım " + step + "/" + steps);
+                tvDetail.setText(label + (bytes > 0 ? "  •  " + formatSize(bytes) : "") + "   •   " + channels + " kanal bulundu");
+            }
+        });
+    }
+
+    private void postFail(final String message) {
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                stopPulse();
+                progressCard.setVisibility(View.GONE);
+                tvStatus.setText(message);
+            }
+        });
+    }
+
+    /** permille: 0..1000 ise belirli çubuk, eksi ise "belirsiz" (dönen) çubuk. */
+    private void setProgress(int permille, String percentText) {
+        if (permille < 0) {
+            if (!bar.isIndeterminate()) bar.setIndeterminate(true);
+        } else {
+            if (bar.isIndeterminate()) bar.setIndeterminate(false);
+            bar.setMax(1000);
+            bar.setProgress(permille);
+        }
+        tvPercent.setText(percentText);
+    }
+
+    private static String formatSize(long bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024L * 1024) return String.format(Locale.US, "%.0f KB", bytes / 1024.0);
+        return String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0));
+    }
+
+    private void startPulse() {
+        if (pulse != null) return;
+        pulse = ObjectAnimator.ofPropertyValuesHolder(tvPulse,
+                PropertyValuesHolder.ofFloat("scaleX", 1f, 1.25f),
+                PropertyValuesHolder.ofFloat("scaleY", 1f, 1.25f),
+                PropertyValuesHolder.ofFloat("alpha", 0.55f, 1f));
+        pulse.setDuration(700);
+        pulse.setRepeatCount(ValueAnimator.INFINITE);
+        pulse.setRepeatMode(ValueAnimator.REVERSE);
+        pulse.start();
+    }
+
+    private void stopPulse() {
+        if (pulse != null) {
+            pulse.cancel();
+            pulse = null;
+        }
     }
 
     private void show(M3UParser.Result r, String panel) {
         data = r;
         String text = "✅ " + r.groups.size() + " ana grup  •  " + r.categoryCount + " kategori  •  "
                 + r.channelCount + " kanal   (" + panel + ")";
+        if (r.fromApi) text += "\nℹ️ Kategoriler panelin API'sinden alındı";
         if (r.truncated) text += "\n⚠️ Liste çok büyük, bir kısmı gösteriliyor";
+        summaryText = text;
         tvStatus.setText(text);
-        expandable.setAdapter(new GroupsAdapter());
+
+        rebuildView();
+        groupsAdapter = new GroupsAdapter();
+        expandable.setAdapter(groupsAdapter);
         if (!r.groups.isEmpty()) expandable.expandGroup(0);
+
+        // Kartı yavaşça kapat, listeyi yavaşça göster
+        stopPulse();
+        progressCard.animate().alpha(0f).setDuration(250).withEndAction(new Runnable() {
+            @Override
+            public void run() {
+                progressCard.setVisibility(View.GONE);
+            }
+        });
+        expandable.setAlpha(0f);
+        expandable.setVisibility(View.VISIBLE);
+        expandable.animate().alpha(1f).setDuration(300);
+        chipRow.setVisibility(View.VISIBLE);
+        updateChips();
+    }
+
+    // ------------------------------------------------------------------ sıralama ve boş kategoriler
+
+    /** Ekranda gösterilecek kategori listesini (sıralama ve boş kategori ayarına göre) yeniden kurar. */
+    private void rebuildView() {
+        view.clear();
+        if (data == null) return;
+        final Collator collator = Collator.getInstance(new Locale("tr", "TR"));
+        for (M3UParser.Group g : data.groups) {
+            List<M3UParser.Category> list = new ArrayList<>();
+            for (M3UParser.Category c : g.categories) {
+                if (hideEmpty && c.channels.isEmpty()) continue;
+                list.add(c);
+            }
+            if (sortMode == 1) {
+                Collections.sort(list, new Comparator<M3UParser.Category>() {
+                    @Override
+                    public int compare(M3UParser.Category x, M3UParser.Category y) {
+                        return collator.compare(x.name, y.name);
+                    }
+                });
+            } else if (sortMode == 2) {
+                Collections.sort(list, new Comparator<M3UParser.Category>() {
+                    @Override
+                    public int compare(M3UParser.Category x, M3UParser.Category y) {
+                        return Integer.compare(y.channels.size(), x.channels.size());
+                    }
+                });
+            }
+            view.add(list);
+        }
+    }
+
+    private void applyView() {
+        rebuildView();
+        if (groupsAdapter != null) groupsAdapter.notifyDataSetChanged();
+        updateChips();
+    }
+
+    private void updateChips() {
+        String[] names = {"Varsayılan", "A-Z", "Kanal sayısı"};
+        chipSort.setText("↕ Sırala: " + names[sortMode]);
+        chipEmpty.setText(hideEmpty ? "👁 Boş kategoriler gizli" : "👁 Boş kategoriler görünür");
+        Ui.setChipSelected(this, chipEmpty, hideEmpty);
+    }
+
+    private void showSortDialog() {
+        final String[] items = {"Varsayılan (Türkçe kategoriler önce)", "Ada göre (A-Z)", "Kanal sayısına göre (çok olan önce)"};
+        new AlertDialog.Builder(this)
+                .setTitle("Kategorileri sırala")
+                .setSingleChoiceItems(items, sortMode, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int which) {
+                        sortMode = which;
+                        d.dismiss();
+                        applyView();
+                    }
+                })
+                .show();
     }
 
     // ------------------------------------------------------------------ arama
 
     private void runSearch() {
-        String q = etSearch.getText().toString().trim().toLowerCase(Locale.ROOT);
-        if (q.isEmpty() || data == null) {
+        final String raw = etSearch.getText().toString().trim();
+        final M3UParser.Result snapshot = data;
+        if (snapshot == null) return;           // liste henüz inmedi
+        if (raw.isEmpty()) {
+            searchSeq++;
             resultsList.setVisibility(View.GONE);
             expandable.setVisibility(View.VISIBLE);
+            chipRow.setVisibility(View.VISIBLE);
+            tvStatus.setText(summaryText);
             return;
         }
-        hits.clear();
-        hitLabels.clear();
-        boolean full = false;
-        for (M3UParser.Group g : data.groups) {
-            if (full) break;
-            for (M3UParser.Category cat : g.categories) {
-                if (full) break;
-                if (cat.name.toLowerCase(Locale.ROOT).contains(q)) {
-                    Hit h = new Hit();
-                    h.category = cat;
-                    h.label = "📁 " + cat.name + "  (" + cat.channels.size() + " kanal)\n   " + g.name;
-                    hits.add(h);
-                    hitLabels.add(h.label);
-                }
-                for (String ch : cat.channels) {
-                    if (ch.toLowerCase(Locale.ROOT).contains(q)) {
-                        Hit h = new Hit();
-                        h.category = cat;
-                        h.channel = ch;
-                        h.label = "📺 " + ch + "\n   " + g.name + " › " + cat.name;
-                        hits.add(h);
-                        hitLabels.add(h.label);
-                        if (hits.size() >= MAX_HITS) {
-                            full = true;
-                            break;
+        final int seq = ++searchSeq;
+        final String q = TextUtil.norm(raw);
+        tvStatus.setText("🔎 Aranıyor…");
+        try {
+            searchIo.execute(new Runnable() {
+                @Override
+                public void run() {
+                    final List<Hit> found = new ArrayList<>();
+                    final List<String> labels = new ArrayList<>();
+                    boolean full = false;
+                    for (M3UParser.Group g : snapshot.groups) {
+                        if (full) break;
+                        for (M3UParser.Category cat : g.categories) {
+                            if (full) break;
+                            if (seq != searchSeq || cancelled) return;       // daha yeni bir arama başladı
+                            if (TextUtil.norm(cat.name).contains(q)) {
+                                Hit h = new Hit();
+                                h.category = cat;
+                                h.label = "📁 " + cat.name + "  (" + cat.channels.size() + " kanal)\n   " + g.name;
+                                found.add(h);
+                                labels.add(h.label);
+                            }
+                            for (String ch : cat.channels) {
+                                if (TextUtil.norm(ch).contains(q)) {
+                                    Hit h = new Hit();
+                                    h.category = cat;
+                                    h.channel = ch;
+                                    h.label = "📺 " + ch + "\n   " + g.name + " › " + cat.name;
+                                    found.add(h);
+                                    labels.add(h.label);
+                                    if (found.size() >= MAX_HITS) {
+                                        full = true;
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     }
+                    final boolean isFull = full;
+                    handler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (seq != searchSeq) return;
+                            hits.clear();
+                            hits.addAll(found);
+                            hitLabels.clear();
+                            hitLabels.addAll(labels);
+                            hitsAdapter.notifyDataSetChanged();
+                            expandable.setVisibility(View.GONE);
+                            chipRow.setVisibility(View.GONE);
+                            resultsList.setVisibility(View.VISIBLE);
+                            tvStatus.setText(hits.isEmpty() ? "Sonuç bulunamadı"
+                                    : hits.size() + (isFull ? "+" : "") + " sonuç");
+                        }
+                    });
                 }
-            }
-        }
-        hitsAdapter.notifyDataSetChanged();
-        expandable.setVisibility(View.GONE);
-        resultsList.setVisibility(View.VISIBLE);
-        if (hits.isEmpty()) {
-            tvStatus.setText("Sonuç bulunamadı");
-        } else {
-            tvStatus.setText(hits.size() + (full ? "+" : "") + " sonuç");
+            });
+        } catch (RuntimeException e) {
+            // Ekran kapanmış, yapılacak bir şey yok
         }
     }
 
@@ -296,15 +675,39 @@ public class ChannelsActivity extends Activity {
         });
         root.addView(etSearch, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
 
+        // Sıralama ve boş kategori düğmeleri (liste yüklenince görünür)
+        chipRow = new LinearLayout(this);
+        chipRow.setOrientation(LinearLayout.HORIZONTAL);
+        chipRow.setVisibility(View.GONE);
+        chipSort = Ui.chip(this, "↕ Sırala");
+        chipSort.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showSortDialog();
+            }
+        });
+        chipRow.addView(chipSort, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
+        chipEmpty = Ui.chip(this, "👁 Boş kategoriler görünür");
+        chipEmpty.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                hideEmpty = !hideEmpty;
+                applyView();
+            }
+        });
+        chipRow.addView(chipEmpty);
+        root.addView(chipRow, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
+
         FrameLayout frame = new FrameLayout(this);
         expandable = new ExpandableListView(this);
         expandable.setBackground(Ui.rounded(this, Ui.WHITE, Ui.LINE, 12));
         expandable.setDividerHeight(0);
+        expandable.setVisibility(View.GONE);
         expandable.setOnChildClickListener(new ExpandableListView.OnChildClickListener() {
             @Override
             public boolean onChildClick(ExpandableListView p, View v, int groupPos, int childPos, long id) {
-                if (data == null) return true;
-                showCategory(data.groups.get(groupPos).categories.get(childPos), null);
+                if (data == null || groupPos >= view.size() || childPos >= view.get(groupPos).size()) return true;
+                showCategory(view.get(groupPos).get(childPos), null);
                 return true;
             }
         });
@@ -326,6 +729,31 @@ public class ChannelsActivity extends Activity {
         });
         frame.addView(resultsList, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // İndirme kartı: titreşen simge, yüzde, çubuk, aşama ve ayrıntı
+        progressCard = Ui.card(this);
+        progressCard.setGravity(Gravity.CENTER_HORIZONTAL);
+        tvPulse = Ui.text(this, "📺", 44, Ui.TEXT, false);
+        tvPulse.setGravity(Gravity.CENTER);
+        progressCard.addView(tvPulse, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 8, 0, 4));
+        tvPercent = Ui.text(this, "…", 30, Ui.PRIMARY, true);
+        tvPercent.setGravity(Gravity.CENTER);
+        progressCard.addView(tvPercent, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 6));
+        bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        bar.setIndeterminate(true);
+        bar.setProgressTintList(ColorStateList.valueOf(Ui.PRIMARY));
+        bar.setIndeterminateTintList(ColorStateList.valueOf(Ui.PRIMARY));
+        progressCard.addView(bar, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 10), 0, 0, 0, 10));
+        tvStage = Ui.text(this, "🔌 Sunucuya bağlanılıyor…", 14, Ui.TEXT, true);
+        tvStage.setGravity(Gravity.CENTER);
+        progressCard.addView(tvStage);
+        tvDetail = Ui.text(this, "", 12, Ui.SUB, false);
+        tvDetail.setGravity(Gravity.CENTER);
+        progressCard.addView(tvDetail, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 4, 0, 4));
+        FrameLayout.LayoutParams cardParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP);
+        frame.addView(progressCard, cardParams);
+
         LinearLayout.LayoutParams fp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
         fp.bottomMargin = Ui.dp(this, 12);
         root.addView(frame, fp);
@@ -343,7 +771,7 @@ public class ChannelsActivity extends Activity {
 
         @Override
         public int getChildrenCount(int g) {
-            return data.groups.get(g).categories.size();
+            return view.get(g).size();
         }
 
         @Override
@@ -353,7 +781,7 @@ public class ChannelsActivity extends Activity {
 
         @Override
         public Object getChild(int g, int c) {
-            return data.groups.get(g).categories.get(c);
+            return view.get(g).get(c);
         }
 
         @Override
@@ -393,7 +821,7 @@ public class ChannelsActivity extends Activity {
         @Override
         public View getChildView(int g, int c, boolean isLast, View convertView, ViewGroup parent) {
             TextView t = convertView instanceof TextView ? (TextView) convertView : new TextView(ChannelsActivity.this);
-            M3UParser.Category cat = data.groups.get(g).categories.get(c);
+            M3UParser.Category cat = view.get(g).get(c);
             t.setText(cat.name + "   (" + cat.channels.size() + ")");
             t.setTextSize(14);
             t.setTypeface(Typeface.DEFAULT);

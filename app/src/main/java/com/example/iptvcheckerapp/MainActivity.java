@@ -30,6 +30,9 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -44,6 +47,7 @@ import java.util.concurrent.Executors;
 public class MainActivity extends Activity {
 
     private static final int REQ_FILE = 101;
+    private static final int REQ_EXPORT = 102;
     private static final String PREFS = "iptv_prefs";
     private static final int MAX_PANELS_SHOWN = 300;
     private static final int MAX_SAVED_CHARS = 1500000;
@@ -53,7 +57,8 @@ public class MainActivity extends Activity {
     private LinearLayout panelBox;
     private CheckBox cbAll, cbM3u;
     private SeekBar sbThreads;
-    private Button btnStart, btnChannels;
+    private Button btnStart, btnChannels, btnExport;
+    private String pendingExport;
 
     private final List<Account> fileAccounts = new ArrayList<>();
     private List<Account> allAccounts = new ArrayList<>();
@@ -211,6 +216,8 @@ public class MainActivity extends Activity {
         root.addView(btnStart, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
         btnChannels = Ui.button(this, "📺  Kanal Listesine Bak", Ui.WHITE, Ui.PRIMARY);
         root.addView(btnChannels, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
+        btnExport = Ui.button(this, "📤  Kayıtlı linkleri dışa aktar", Ui.WHITE, Ui.PRIMARY);
+        root.addView(btnExport, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
 
         TextView format = Ui.text(this, "Desteklenen link biçimi:\nhttp://adres:port/get.php?username=…&password=…\nDosya olarak .txt, .m3u ve .docx okunur.",
                 12, Ui.SUB, false);
@@ -257,6 +264,12 @@ public class MainActivity extends Activity {
             @Override
             public void onClick(View v) {
                 startCheck();
+            }
+        });
+        btnExport.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                exportSavedLinks();
             }
         });
         btnChannels.setOnClickListener(new View.OnClickListener() {
@@ -412,6 +425,72 @@ public class MainActivity extends Activity {
         etLinks.setText(current.isEmpty() ? t.toString() : current + "\n" + t);
     }
 
+    @Override
+    protected void onResume() {
+        super.onResume();
+        updateExportLabel();
+    }
+
+    private void updateExportLabel() {
+        int n = SavedLinks.count(this);
+        btnExport.setText("📤  Kayıtlı linkleri dışa aktar (" + n + ")");
+        btnExport.setAlpha(n == 0 ? 0.45f : 1f);
+    }
+
+    private void exportSavedLinks() {
+        List<String> links = SavedLinks.all(this);
+        if (links.isEmpty()) {
+            Toast.makeText(this, "Listende kayıtlı link yok. Sonuç ekranından \"Listeme ekle\" ile link ekle", Toast.LENGTH_LONG).show();
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (String l : links) sb.append(l).append('\n');
+        pendingExport = sb.toString();
+        String stamp = new SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(new Date());
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("text/plain");
+        i.putExtra(Intent.EXTRA_TITLE, "kayitli_linkler_" + stamp + ".txt");
+        try {
+            startActivityForResult(i, REQ_EXPORT);
+        } catch (Exception e) {
+            pendingExport = null;
+            Toast.makeText(this, "Dosya kaydetme ekranı açılamadı", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void handleExportResult(int resultCode, Intent data) {
+        final String text = pendingExport;
+        pendingExport = null;
+        if (resultCode != RESULT_OK || data == null || data.getData() == null || text == null) return;
+        final Uri uri = data.getData();
+        final int count = text.split("\n").length;
+        io.execute(new Runnable() {
+            @Override
+            public void run() {
+                String error = null;
+                try {
+                    OutputStream out = getContentResolver().openOutputStream(uri, "wt");
+                    if (out == null) throw new java.io.IOException("Dosya açılamadı");
+                    try {
+                        out.write(text.getBytes("UTF-8"));
+                    } finally {
+                        out.close();
+                    }
+                } catch (Exception e) {
+                    error = e.getMessage() == null ? "bilinmeyen hata" : e.getMessage();
+                }
+                final String msg = error == null ? count + " link dosyaya aktarıldı" : "Aktarılamadı: " + error;
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
+                    }
+                });
+            }
+        });
+    }
+
     private void pickFile() {
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);
@@ -426,6 +505,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_EXPORT) {
+            handleExportResult(resultCode, data);
+            return;
+        }
         if (requestCode != REQ_FILE || resultCode != RESULT_OK || data == null || data.getData() == null) return;
         final Uri uri = data.getData();
         final String name = fileNameOf(uri);

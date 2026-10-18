@@ -77,7 +77,7 @@ public class ResultsActivity extends Activity {
     // Ekran parçaları
     private TextView tvSummary, tvCounts, tvTime, tvFilterInfo, tvEmpty;
     private ProgressBar bar;
-    private Button btnStop, btnCopy, btnShare, btnRetry, btnSave, btnClean;
+    private Button btnStop, btnCopy, btnShare, btnRetry, btnSave, btnClean, btnAddList;
     private final TextView[] chips = new TextView[5];
     private ListView listView;
     private RowAdapter adapter;
@@ -284,6 +284,9 @@ public class ResultsActivity extends Activity {
         btnClean.setAlpha(canClean ? 1f : 0.45f);
         btnSave.setEnabled(!shown.isEmpty());
         btnSave.setAlpha(shown.isEmpty() ? 0.45f : 1f);
+        btnAddList.setText("➕ Listeme ekle (" + shown.size() + ")");
+        btnAddList.setEnabled(!shown.isEmpty());
+        btnAddList.setAlpha(shown.isEmpty() ? 0.45f : 1f);
 
         String fi = filterSummary();
         tvFilterInfo.setVisibility(fi.isEmpty() ? View.GONE : View.VISIBLE);
@@ -367,28 +370,11 @@ public class ResultsActivity extends Activity {
         sum.addView(tvTime, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 2, 0, 0));
         root.addView(sum, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
 
-        // Filtre çipleri
+        // Üst bar: durum çipleri
         HorizontalScrollView hs = new HorizontalScrollView(this);
         hs.setHorizontalScrollBarEnabled(false);
         LinearLayout chipRow = new LinearLayout(this);
         chipRow.setOrientation(LinearLayout.HORIZONTAL);
-        // Sıra: Sırala - Filtre - Hepsi - Tam aktif - Kısmi - Pasif - Süresi dolmuş
-        TextView sortChip = Ui.chip(this, "↕ Sırala");
-        sortChip.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                showSortDialog();
-            }
-        });
-        chipRow.addView(sortChip, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
-        TextView filterChip = Ui.chip(this, "⚙ Filtre");
-        filterChip.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                showFilterMenu();
-            }
-        });
-        chipRow.addView(filterChip, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
         String[] names = {"Hepsi", "✅ Tam aktif", "⚠️ Kısmi", "❌ Pasif", "⌛ Süresi dolmuş"};
         for (int i = 0; i < names.length; i++) {
             final int idx = i;
@@ -404,7 +390,61 @@ public class ResultsActivity extends Activity {
             chipRow.addView(chip, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
         }
         hs.addView(chipRow);
-        root.addView(hs, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
+        root.addView(hs, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 6));
+
+        // Alt bar: sırala ve filtre düğmeleri
+        HorizontalScrollView hs2 = new HorizontalScrollView(this);
+        hs2.setHorizontalScrollBarEnabled(false);
+        LinearLayout row2 = new LinearLayout(this);
+        row2.setOrientation(LinearLayout.HORIZONTAL);
+
+        TextView sortChip = Ui.chip(this, "↕ Sırala");
+        sortChip.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showSortDialog();
+            }
+        });
+        row2.addView(sortChip, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
+
+        TextView maxChip = Ui.chip(this, "Maksimum bağlantı sayısı");
+        maxChip.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pickMulti("Maksimum bağlantı", maxOptions(), fMax);
+            }
+        });
+        row2.addView(maxChip, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
+
+        TextView yearChip = Ui.chip(this, "Bitiş yılı");
+        yearChip.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pickMulti("Bitiş yılı", yearOptions(), fYears);
+            }
+        });
+        row2.addView(yearChip, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
+
+        TextView panelChip = Ui.chip(this, "Panel");
+        panelChip.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pickMulti("Panel", panelOptions(), fPanels);
+            }
+        });
+        row2.addView(panelChip, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
+
+        TextView clearChip = Ui.chip(this, "Tüm filtreleri temizle");
+        clearChip.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                clearFilters();
+            }
+        });
+        row2.addView(clearChip);
+
+        hs2.addView(row2);
+        root.addView(hs2, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
 
         // Arama kutusu
         EditText search = new EditText(this);
@@ -487,7 +527,20 @@ public class ResultsActivity extends Activity {
         });
         actions2.addView(btnSave, Ui.weight(this, 0, 3));
         actions2.addView(btnClean, Ui.weight(this, 3, 0));
-        root.addView(actions2, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 4));
+        root.addView(actions2, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 6));
+
+        LinearLayout actions3 = new LinearLayout(this);
+        actions3.setOrientation(LinearLayout.HORIZONTAL);
+        btnAddList = Ui.button(this, "➕ Listeme ekle", Ui.WHITE, Ui.TEXT);
+        btnAddList.setTextSize(12);
+        btnAddList.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                addShownToList();
+            }
+        });
+        actions3.addView(btnAddList, Ui.weight(this, 0, 0));
+        root.addView(actions3, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 4));
 
         // Liste
         android.widget.FrameLayout listFrame = new android.widget.FrameLayout(this);
@@ -677,6 +730,23 @@ public class ResultsActivity extends Activity {
         i.setType("text/plain");
         i.putExtra(Intent.EXTRA_TEXT, text);
         startActivity(Intent.createChooser(i, "Linkleri paylaş"));
+    }
+
+    // ------------------------------------------------------------------ listeme ekle
+
+    private void addShownToList() {
+        if (shown.isEmpty()) {
+            Toast.makeText(this, "Eklenecek link yok", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        List<String> links = new ArrayList<>();
+        for (CheckResult r : shown) links.add(r.account.original);
+        int added = SavedLinks.add(this, links);
+        int total = SavedLinks.count(this);
+        int already = links.size() - added;
+        String msg = added + " link eklendi. Listende toplam " + total + " link var.";
+        if (already > 0) msg += " (" + already + " tanesi zaten vardı)";
+        Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
     }
 
     // ------------------------------------------------------------------ dosyaya kaydet / temizle

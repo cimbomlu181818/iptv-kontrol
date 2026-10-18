@@ -173,11 +173,13 @@ public final class ApiCatalog {
                     }
                     String name = null;
                     String cid = null;
+                    String sid = null;
                     r.beginObject();
                     while (r.hasNext()) {
                         String key = r.nextName();
                         if ("name".equals(key)) name = readString(r);
                         else if ("category_id".equals(key)) cid = readString(r);
+                        else if ("stream_id".equals(key) && M3UParser.LIVE.equals(main)) sid = readString(r);
                         else r.skipValue();
                     }
                     r.endObject();
@@ -190,7 +192,7 @@ public final class ApiCatalog {
                         cat = cats.get(cid);
                         if (cat == null) cat = "Kategori " + cid;
                     }
-                    if (!b.add(main, cat, name.trim())) return true;       // kanal sınırı doldu
+                    if (!b.add(main, cat, name.trim(), sid)) return true;       // kanal sınırı doldu
 
                     if ((++n & 255) == 0) {
                         long now = System.nanoTime();

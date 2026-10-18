@@ -11,12 +11,19 @@ import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.content.ComponentName;
+import android.content.Intent;
+import android.content.pm.ActivityInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.net.Uri;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.BaseExpandableListAdapter;
@@ -51,6 +58,8 @@ import java.util.concurrent.Executors;
  */
 public class ChannelsActivity extends Activity {
 
+    private static final String TAG = "IPTVPlay";
+
     private static final int MAX_TRIES = 20;
     private static final int MAX_HITS = 400;
     private static final long MAX_BYTES = 40L * 1024 * 1024;
@@ -59,6 +68,7 @@ public class ChannelsActivity extends Activity {
         String label;
         M3UParser.Category category;
         String channel;     // null ise kategori eşleşmesidir
+        int index = -1;     // kanalın kategori içindeki sırası
     }
 
     /** Bir hesabı deneme sonucu: liste ya da neden alınamadığı. */
@@ -287,6 +297,7 @@ public class ChannelsActivity extends Activity {
         }
 
         if (best != null) {
+            best.account = a;
             at.result = best;
             return at;
         }
@@ -434,6 +445,26 @@ public class ChannelsActivity extends Activity {
 
     private void show(M3UParser.Result r, String panel) {
         data = r;
+        int withId = 0;
+        int liveTotal = 0;
+        for (M3UParser.Group g : r.groups) {
+            for (M3UParser.Category c : g.categories) {
+                for (int k = 0; k < c.ids.size(); k++) {
+                    if (!c.ids.get(k).isEmpty()) withId++;
+                }
+                if (M3UParser.LIVE.equals(g.name)) liveTotal += c.channels.size();
+            }
+        }
+        Log.d(TAG, "Liste geldi: panel=" + panel + ", kaynak=" + (r.fromApi ? "API" : "M3U")
+                + ", toplam kanal=" + r.channelCount + ", canlı kanal=" + liveTotal
+                + ", numarası olan kanal=" + withId + ", hesap bağlı mı=" + (r.account != null));
+        if (r.sampleLive != null && !r.sampleLive.isEmpty()) {
+            String shown = r.sampleLive;
+            if (r.account != null && r.account.password != null && !r.account.password.isEmpty()) {
+                shown = shown.replace(r.account.password, "***");
+            }
+            Log.d(TAG, "Numarası okunamayan canlı kanal linki örneği: " + shown);
+        }
         String text = "✅ " + r.groups.size() + " ana grup  •  " + r.categoryCount + " kategori  •  "
                 + r.channelCount + " kanal   (" + panel + ")";
         if (r.fromApi) text += "\nℹ️ Kategoriler panelin API'sinden alındı";
@@ -557,11 +588,13 @@ public class ChannelsActivity extends Activity {
                                 found.add(h);
                                 labels.add(h.label);
                             }
-                            for (String ch : cat.channels) {
+                            for (int ci = 0; ci < cat.channels.size(); ci++) {
+                                String ch = cat.channels.get(ci);
                                 if (TextUtil.norm(ch).contains(q)) {
                                     Hit h = new Hit();
                                     h.category = cat;
                                     h.channel = ch;
+                                    h.index = ci;
                                     h.label = "📺 " + ch + "\n   " + g.name + " › " + cat.name;
                                     found.add(h);
                                     labels.add(h.label);
@@ -599,6 +632,7 @@ public class ChannelsActivity extends Activity {
 
     private void showCategory(final M3UParser.Category cat, final String highlight) {
         final List<String> names = cat.channels;
+        Log.d(TAG, "Kategori açıldı: " + cat.name + ", kanal=" + cat.channels.size() + ", numara listesi=" + cat.ids.size());
         ArrayAdapter<String> ad = new ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, names) {
             @Override
             public View getView(int position, View convertView, ViewGroup parent) {
@@ -616,10 +650,97 @@ public class ChannelsActivity extends Activity {
                 .setPositiveButton("Kapat", null)
                 .create();
         dlg.show();
+        dlg.getListView().setOnItemClickListener(new AdapterView.OnItemClickListener() {
+            @Override
+            public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
+                Log.d(TAG, "Kanala tıklandı: sıra=" + position);
+                playChannel(cat, position);
+            }
+        });
         if (highlight != null) {
             int idx = names.indexOf(highlight);
             if (idx >= 0) dlg.getListView().setSelection(idx);
         }
+    }
+
+    /** Tıklanan kanalın linkini üretip telefondaki oynatıcı listesini açar. */
+    private void playChannel(M3UParser.Category cat, int position) {
+        if (data == null) {
+            Log.e(TAG, "playChannel: data (liste) boş");
+            return;
+        }
+        if (data.account == null) {
+            Log.e(TAG, "playChannel: hesap bilgisi yok (result.account boş)");
+            Toast.makeText(this, "Hesap bilgisi bulunamadı", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (position < 0 || position >= cat.channels.size()) {
+            Log.e(TAG, "playChannel: geçersiz sıra=" + position + ", kanal sayısı=" + cat.channels.size());
+            return;
+        }
+        String sid = position < cat.ids.size() ? cat.ids.get(position) : "";
+        String name = cat.channels.get(position);
+        Log.d(TAG, "playChannel: kanal=" + name + ", numara='" + sid + "', numara listesi=" + cat.ids.size());
+        if (sid == null || sid.isEmpty()) {
+            Log.w(TAG, "playChannel: bu kanalın numarası yok (film/dizi ya da numara okunamadı)");
+            Toast.makeText(this, "Bu kanal oynatılamıyor: sadece canlı kanallar açılır", Toast.LENGTH_LONG).show();
+            return;
+        }
+        String url = sid.startsWith("http") ? sid : data.account.liveUrl(sid);
+        String safeUrl = url;
+        if (data.account.password != null && !data.account.password.isEmpty()) {
+            safeUrl = url.replace(data.account.password, "***");
+        }
+        Log.d(TAG, "playChannel: adres=" + safeUrl);
+        try {
+            openPlayerChooser(url, name);
+            Log.d(TAG, "playChannel: oynatıcı listesi açıldı");
+        } catch (Exception e) {
+            Log.e(TAG, "playChannel: açılamadı", e);
+            Toast.makeText(this, "Telefonda kanalı açacak bir oynatıcı bulunamadı", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /** Telefondaki video/IPTV oynatıcılarının hepsini toplayıp tek bir seçim listesinde gösterir. */
+    private void openPlayerChooser(String url, String name) {
+        Uri uri = Uri.parse(url);
+        PackageManager pm = getPackageManager();
+
+        Intent main = new Intent(Intent.ACTION_VIEW);
+        main.setDataAndType(uri, "video/*");
+        main.putExtra("title", name);
+
+        java.util.HashSet<String> mainSet = new java.util.HashSet<>();
+        for (ResolveInfo ri : pm.queryIntentActivities(main, 0)) {
+            if (ri.activityInfo != null) mainSet.add(ri.activityInfo.packageName + "/" + ri.activityInfo.name);
+        }
+
+        // Başka türlerle (HLS, TS) ya da türsüz açanları da ekle
+        String[] types = {"video/mp2t", "application/x-mpegURL", "application/vnd.apple.mpegurl", "audio/*", null};
+        List<Intent> extra = new ArrayList<>();
+        java.util.HashSet<String> seen = new java.util.HashSet<>(mainSet);
+        for (String t : types) {
+            Intent q = new Intent(Intent.ACTION_VIEW);
+            if (t == null) q.setData(uri);
+            else q.setDataAndType(uri, t);
+            for (ResolveInfo ri : pm.queryIntentActivities(q, 0)) {
+                ActivityInfo ai = ri.activityInfo;
+                if (ai == null || !ai.exported) continue;
+                String key = ai.packageName + "/" + ai.name;
+                if (!seen.add(key)) continue;
+                Intent target = new Intent(q);
+                target.setComponent(new ComponentName(ai.packageName, ai.name));
+                target.putExtra("title", name);
+                extra.add(target);
+            }
+        }
+        Log.d(TAG, "Oynatıcı: ana listede " + mainSet.size() + ", ek olarak " + extra.size() + " uygulama bulundu");
+
+        Intent chooser = Intent.createChooser(main, "▶ " + name);
+        if (!extra.isEmpty()) {
+            chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, extra.toArray(new Intent[0]));
+        }
+        startActivity(chooser);
     }
 
     // ------------------------------------------------------------------ arayüz

@@ -36,6 +36,8 @@ public final class M3UParser {
     public static class Category {
         public final String name;
         public final List<String> channels = new ArrayList<>();
+        /** channels ile aynı sırada: canlı kanalların yayın numarası (yoksa boş metin). */
+        public final List<String> ids = new ArrayList<>();
 
         Category(String name) {
             this.name = name;
@@ -63,6 +65,10 @@ public final class M3UParser {
         public int channelCount;
         public int categoryCount;
         public boolean truncated;
+        /** Listenin alındığı hesap (kanal linkini üretmek için). */
+        public Account account;
+        /** Hata ayıklama için: numarası okunamayan ilk canlı kanalın linki (yoksa boş). */
+        public String sampleLive = "";
         /** true ise liste M3U'dan değil, panelin API'sinden (player_api.php) oluşturulmuştur. */
         public boolean fromApi;
     }
@@ -104,7 +110,14 @@ public final class M3UParser {
 
         /** Kanalı ekler. Kanal sınırına ulaşıldıysa false döner (okumayı bırakmak gerekir). */
         public boolean add(String main, String cat, String name) {
-            category(main, cat).channels.add(name);
+            return add(main, cat, name, "");
+        }
+
+        /** Kanalı yayın numarasıyla birlikte ekler (numara yoksa boş metin ver). */
+        public boolean add(String main, String cat, String name, String id) {
+            Category c = category(main, cat);
+            c.channels.add(name);
+            c.ids.add(id == null ? "" : id);
             count++;
             return count < MAX_CHANNELS;
         }
@@ -157,6 +170,7 @@ public final class M3UParser {
         String pendingCategory = null;
         String extGrp = null;
         boolean capped = false;
+        String sampleLive = null;
         int lines = 0;
         long lastNotify = System.nanoTime();
         String line;
@@ -181,7 +195,16 @@ public final class M3UParser {
                 String cat = pendingCategory;
                 if (cat == null || cat.isEmpty()) cat = extGrp;
                 if (cat == null || cat.isEmpty()) cat = GENERAL;
-                boolean room = builder.add(mainGroupOf(line), cat, pendingName);
+                String mainGroup = mainGroupOf(line);
+                String sid = "";
+                if (LIVE.equals(mainGroup)) {
+                    sid = liveIdOf(line);
+                    if (sid.isEmpty()) {
+                        sid = line;                       // numara okunamadı: linkin kendisi saklanır
+                        if (sampleLive == null) sampleLive = line;
+                    }
+                }
+                boolean room = builder.add(mainGroup, cat, pendingName, sid);
                 pendingName = null;
                 pendingCategory = null;
                 extGrp = null;
@@ -192,7 +215,9 @@ public final class M3UParser {
             }
         }
         if (progress != null) progress.onProgress(limited.bytesRead(), builder.count());
-        return builder.build(limited.wasTruncated() || capped);
+        Result res = builder.build(limited.wasTruncated() || capped);
+        res.sampleLive = sampleLive == null ? "" : sampleLive;
+        return res;
     }
 
     static String nameOf(String extinf) {
@@ -216,6 +241,19 @@ public final class M3UParser {
         if (LIVE_ID.matcher(path).matches()) return LIVE;
         if (VIDEO_FILE.matcher(path).matches()) return MOVIES;
         return OTHER;
+    }
+
+    /** Canlı yayın linkinin sonundaki numarayı bulur (.../123.ts ya da .../123); yoksa boş metin. */
+    static String liveIdOf(String url) {
+        String path = pathOf(url);
+        int slash = path.lastIndexOf('/');
+        String last = slash >= 0 ? path.substring(slash + 1) : path;
+        int dot = last.indexOf('.');
+        if (dot >= 0) last = last.substring(0, dot);
+        for (int i = 0; i < last.length(); i++) {
+            if (!Character.isDigit(last.charAt(i))) return "";
+        }
+        return last;
     }
 
     private static String pathOf(String url) {

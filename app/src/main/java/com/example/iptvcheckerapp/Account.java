@@ -55,6 +55,11 @@ public class Account {
                 + "&type=m3u_plus&output=ts";
     }
 
+    /** Tek bir canlı kanalın yayın adresi (kanal numarasından üretilir). */
+    public String liveUrl(String streamId) {
+        return baseUrl() + "/live/" + username + "/" + password + "/" + streamId + ".ts";
+    }
+
     /** Aynı hesabı tekrar saymamak için anahtar. */
     public String dedupeKey() {
         return host + ":" + effectivePort() + "|" + username + "|" + password;

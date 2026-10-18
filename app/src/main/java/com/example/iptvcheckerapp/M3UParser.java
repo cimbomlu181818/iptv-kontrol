@@ -1,297 +1,186 @@
 package com.example.iptvcheckerapp;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-public class M3UParser {
+/** M3U listesini Ana grup > Kategori > Kanal yapısına ayırır. Android'e bağlı değildir. */
+public final class M3UParser {
 
-    // 3 seviyeli yapı: Ana Grup -> Kategori -> Kanallar
-    public static Map<String, Map<String, List<String>>> parseM3UContent(String m3uContent) {
-        Map<String, Map<String, List<String>>> mainGroupMap = new HashMap<>();
-        Map<String, List<String>> categoryOrderMap = new LinkedHashMap<>(); // Kategori sırasını takip etmek için
+    private M3UParser() {}
 
-        android.util.Log.d("M3UParser", "M3U içeriği uzunluğu: " + (m3uContent != null ? m3uContent.length() : "null"));
+    public static final String LIVE = "CANLI TV";
+    public static final String MOVIES = "FİLMLER";
+    public static final String SERIES = "DİZİLER";
+    public static final String OTHER = "DİĞER";
 
-        if (m3uContent == null || m3uContent.isEmpty()) {
-            return mainGroupMap;
+    /** Bellek korumak için okunacak en fazla kanal sayısı; aşılırsa liste "kısmen gösteriliyor" sayılır. */
+    public static final int MAX_CHANNELS = 250000;
+
+    private static final Pattern GROUP_TITLE = Pattern.compile("group-title=\"([^\"]*)\"", Pattern.CASE_INSENSITIVE);
+    private static final Pattern TVG_NAME = Pattern.compile("tvg-name=\"([^\"]*)\"", Pattern.CASE_INSENSITIVE);
+    private static final Pattern LIVE_ID = Pattern.compile(".*/\\d+(\\.(ts|m3u8))?$");
+    private static final Pattern VIDEO_FILE = Pattern.compile(".*\\.(mp4|mkv|avi|mov|wmv|flv|mpg|mpeg)$");
+
+    public static class Category {
+        public final String name;
+        public final List<String> channels = new ArrayList<>();
+        private final Set<String> seen = new HashSet<>();
+
+        Category(String name) {
+            this.name = name;
+        }
+    }
+
+    public static class Group {
+        public final String name;
+        public final List<Category> categories = new ArrayList<>();
+        private final Map<String, Category> index = new HashMap<>();
+
+        Group(String name) {
+            this.name = name;
         }
 
-        String[] lines = m3uContent.split("\n");
-        String currentChannelName = null;
-        String currentCategory = "GENEL";
-        String currentUrl = null;
+        public int channelCount() {
+            int n = 0;
+            for (Category c : categories) n += c.channels.size();
+            return n;
+        }
+    }
 
-        for (String line : lines) {
+    public static class Result {
+        public final List<Group> groups = new ArrayList<>();
+        public int channelCount;
+        public int categoryCount;
+        public boolean truncated;
+    }
+
+    public static Result parse(InputStream in, long maxBytes) throws IOException {
+        Http.LimitedInputStream limited = new Http.LimitedInputStream(in, maxBytes);
+        BufferedReader br = new BufferedReader(new InputStreamReader(limited, "UTF-8"), 64 * 1024);
+        Map<String, Group> groups = new LinkedHashMap<>();
+        String pendingName = null;
+        String pendingCategory = null;
+        String extGrp = null;
+        int total = 0;
+        boolean capped = false;
+        String line;
+        while ((line = br.readLine()) != null) {
             line = line.trim();
-
-            if (line.startsWith("#EXTINF:")) {
-                currentChannelName = extractChannelName(line);
-                currentCategory = extractCategory(line);
-
-            } else if (!line.isEmpty() && !line.startsWith("#") && currentChannelName != null) {
-                currentUrl = line;
-
-                String cleanCategory = cleanCategory(currentCategory);
-                String mainGroup = determineMainGroup(currentUrl);
-
-                if (!mainGroupMap.containsKey(mainGroup)) {
-                    mainGroupMap.put(mainGroup, new LinkedHashMap<>()); // Sırayı korumak için LinkedHashMap
+            if (line.isEmpty()) continue;
+            if (line.startsWith("#EXTINF")) {
+                pendingName = nameOf(line);
+                Matcher g = GROUP_TITLE.matcher(line);
+                pendingCategory = g.find() ? g.group(1).trim() : null;
+            } else if (line.startsWith("#EXTGRP:")) {
+                extGrp = line.substring(8).trim();
+            } else if (line.charAt(0) != '#') {
+                if (pendingName == null) continue;
+                String cat = pendingCategory;
+                if (cat == null || cat.isEmpty()) cat = extGrp;
+                if (cat == null || cat.isEmpty()) cat = "GENEL";
+                String main = mainGroupOf(line);
+                Group group = groups.get(main);
+                if (group == null) {
+                    group = new Group(main);
+                    groups.put(main, group);
                 }
-
-                Map<String, List<String>> categoryMap = mainGroupMap.get(mainGroup);
-
-                if (!categoryMap.containsKey(cleanCategory)) {
-                    categoryMap.put(cleanCategory, new ArrayList<>());
-                    // Kategori sırasını kaydet (sadece ilk kez görüldüğünde)
-                    if (!categoryOrderMap.containsKey(cleanCategory)) {
-                        categoryOrderMap.put(cleanCategory, new ArrayList<>());
-                    }
+                Category category = group.index.get(cat);
+                if (category == null) {
+                    category = new Category(cat);
+                    group.index.put(cat, category);
+                    group.categories.add(category);
                 }
-
-                List<String> channels = categoryMap.get(cleanCategory);
-
-                if (!channels.contains(currentChannelName)) {
-                    channels.add(currentChannelName);
-                }
-
-                currentChannelName = null;
-                currentUrl = null;
-            }
-        }
-
-        // Ana grupları ve kategorileri sırala
-        Map<String, Map<String, List<String>>> sortedMainGroupMap = sortMainGroupsAndCategories(mainGroupMap, categoryOrderMap);
-
-        android.util.Log.d("M3UParser", "Toplam " + sortedMainGroupMap.size() + " ana grup bulundu");
-        return sortedMainGroupMap;
-    }
-
-    private static String extractChannelName(String extinfLine) {
-        try {
-            int lastComma = extinfLine.lastIndexOf(",");
-            if (lastComma != -1 && lastComma + 1 < extinfLine.length()) {
-                return extinfLine.substring(lastComma + 1).trim();
-            }
-
-            if (extinfLine.contains("tvg-name=")) {
-                int start = extinfLine.indexOf("tvg-name=\"") + 10;
-                int end = extinfLine.indexOf("\"", start);
-                if (start != -1 && end != -1 && start < end) {
-                    return extinfLine.substring(start, end).trim();
-                }
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-
-        return "Bilinmeyen Kanal";
-    }
-
-    private static String extractCategory(String extinfLine) {
-        try {
-            if (extinfLine.contains("group-title=")) {
-                int start = extinfLine.indexOf("group-title=\"") + 13;
-                int end = extinfLine.indexOf("\"", start);
-                if (start != -1 && end != -1 && start < end) {
-                    return extinfLine.substring(start, end).trim();
-                }
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-        return "GENEL";
-    }
-
-    private static String cleanCategory(String category) {
-        if (category == null || category.isEmpty()) {
-            return "GENEL";
-        }
-        return category.trim();
-    }
-
-    // Ana grup belirleme
-    private static String determineMainGroup(String url) {
-        if (url == null || url.isEmpty()) return "DİĞER";
-
-        if (hasSlashNumberFormat(url)) {
-            return "CANLI TV";
-        } else if (isMovieUrl(url)) {
-            return "FİLMLER";
-        } else if (isSeriesUrl(url)) {
-            return "DİZİLER";
-        }
-
-        return "DİĞER";
-    }
-
-    // Ana grupları ve kategorileri sırala
-    private static Map<String, Map<String, List<String>>> sortMainGroupsAndCategories(
-            Map<String, Map<String, List<String>>> mainGroupMap,
-            Map<String, List<String>> categoryOrderMap) {
-
-        Map<String, Map<String, List<String>>> sortedMap = new LinkedHashMap<>();
-
-        // Ana grup sıralaması
-        String[] mainGroupOrder = {"CANLI TV", "FİLMLER", "DİZİLER", "DİĞER"};
-
-        for (String mainGroup : mainGroupOrder) {
-            if (mainGroupMap.containsKey(mainGroup)) {
-                Map<String, List<String>> categoryMap = mainGroupMap.get(mainGroup);
-
-                if (mainGroup.equals("CANLI TV")) {
-                    // CANLI TV: Türkçe öncelikli + M3U orijinal sıralama
-                    Map<String, List<String>> sortedCategoryMap = sortLiveTvCategoriesWithTurkishPriority(categoryMap);
-                    sortedMap.put(mainGroup, sortedCategoryMap);
-                } else {
-                    // Diğer gruplar: M3U orijinal sıralama (LinkedHashMap zaten sırayı koruyor)
-                    sortedMap.put(mainGroup, categoryMap);
+                boolean added = category.seen.add(pendingName);
+                if (added) category.channels.add(pendingName);
+                pendingName = null;
+                pendingCategory = null;
+                extGrp = null;
+                if (added && ++total >= MAX_CHANNELS) {
+                    capped = true;
+                    break;
                 }
             }
         }
 
-        return sortedMap;
-    }
-
-    // CANLI TV kategorilerini Türkçe öncelikli + M3U orijinal sıralama
-    private static Map<String, List<String>> sortLiveTvCategoriesWithTurkishPriority(
-            Map<String, List<String>> categoryMap) {
-
-        Map<String, List<String>> sortedMap = new LinkedHashMap<>();
-
-        // 1. AŞAMA: Türkçe isimli kategoriler
-        Map<String, List<String>> turkishNamedCategories = new LinkedHashMap<>();
-
-        // 2. AŞAMA: Diğer kategoriler (M3U orijinal sırası)
-        Map<String, List<String>> otherCategories = new LinkedHashMap<>();
-
-        // Kategorileri ayır
-        for (Map.Entry<String, List<String>> entry : categoryMap.entrySet()) {
-            String category = entry.getKey();
-            List<String> channels = entry.getValue();
-
-            if (isTurkishCategory(category)) {
-                // 1. AŞAMA: Türkçe isimli kategoriler
-                turkishNamedCategories.put(category, channels);
-                android.util.Log.d("M3UParser", "Türk Kategori: " + category + " - 1. Aşama");
-            } else {
-                // 2. AŞAMA: Diğer kategoriler (M3U sırası korunacak)
-                otherCategories.put(category, channels);
-                android.util.Log.d("M3UParser", "Diğer Kategori: " + category + " - 2. Aşama (M3U sırası)");
-            }
+        Result result = new Result();
+        result.truncated = limited.wasTruncated() || capped;
+        String[] order = {LIVE, MOVIES, SERIES, OTHER};
+        for (String key : order) {
+            Group g = groups.get(key);
+            if (g == null) continue;
+            if (key.equals(LIVE)) turkishFirst(g);
+            result.groups.add(g);
+            result.categoryCount += g.categories.size();
+            result.channelCount += g.channelCount();
         }
-
-        // Sıralı birleştir: Önce Türkçe kategoriler, sonra diğerleri (M3U sırasında)
-        sortedMap.putAll(turkishNamedCategories);
-        sortedMap.putAll(otherCategories);
-
-        android.util.Log.d("M3UParser", "Sıralama Tamamlandı: " +
-                turkishNamedCategories.size() + " Türk isimli, " +
-                otherCategories.size() + " diğer kategori");
-
-        return sortedMap;
+        return result;
     }
 
-    // Kategori Türkçe mi kontrol et (1. Aşama)
-    private static boolean isTurkishCategory(String categoryName) {
-        if (categoryName == null || categoryName.isEmpty()) {
-            return false;
+    static String nameOf(String extinf) {
+        int quote = extinf.lastIndexOf('"');
+        int comma = extinf.indexOf(',', quote + 1);
+        if (comma < 0) comma = extinf.lastIndexOf(',');
+        String name = comma >= 0 ? extinf.substring(comma + 1).trim() : "";
+        if (name.isEmpty()) {
+            Matcher m = TVG_NAME.matcher(extinf);
+            if (m.find()) name = m.group(1).trim();
         }
-
-        String lowerCategory = categoryName.toLowerCase();
-
-        return lowerCategory.startsWith("turk") ||
-                lowerCategory.startsWith("tr:") ||
-                lowerCategory.startsWith("türk") ||
-                lowerCategory.contains("turkish") ||
-                lowerCategory.contains("türkçe") ||
-                lowerCategory.contains("turkey") ||
-                lowerCategory.contains("yerli");
+        return name.isEmpty() ? "Adsız kanal" : name;
     }
 
-    // Linkin sonunda "/sayı" formatı olup olmadığını kontrol et (CANLI TV)
-    private static boolean hasSlashNumberFormat(String url) {
-        if (url == null || url.isEmpty()) return false;
-
-        String cleanUrl = url.split("[?#]")[0];
-        String lastPart = cleanUrl.trim();
-
-        boolean hasSlashNumber = lastPart.matches(".*/\\d+$");
-
-        return hasSlashNumber;
+    /** Linkin yoluna bakarak canlı yayın / film / dizi ayrımı yapar (sunucu adına bakmaz). */
+    static String mainGroupOf(String url) {
+        String path = pathOf(url).toLowerCase(Locale.ROOT);
+        if (path.contains("/movie/")) return MOVIES;
+        if (path.contains("/series/")) return SERIES;
+        if (path.contains("/live/")) return LIVE;
+        if (LIVE_ID.matcher(path).matches()) return LIVE;
+        if (VIDEO_FILE.matcher(path).matches()) return MOVIES;
+        return OTHER;
     }
 
-    // Film URL'si mi kontrol et
-    private static boolean isMovieUrl(String url) {
-        if (url == null || url.isEmpty()) return false;
-
-        String lowerUrl = url.toLowerCase();
-        return lowerUrl.contains("movie") ||
-                lowerUrl.contains("film") ||
-                lowerUrl.contains("/movies/") ||
-                lowerUrl.contains("/film/");
+    private static String pathOf(String url) {
+        String s = url;
+        int sep = s.indexOf("://");
+        if (sep >= 0) s = s.substring(sep + 3);
+        int slash = s.indexOf('/');
+        s = slash < 0 ? "" : s.substring(slash);
+        int cut = s.indexOf('?');
+        if (cut >= 0) s = s.substring(0, cut);
+        cut = s.indexOf('#');
+        if (cut >= 0) s = s.substring(0, cut);
+        return s;
     }
 
-    // Dizi URL'si mi kontrol et
-    private static boolean isSeriesUrl(String url) {
-        if (url == null || url.isEmpty()) return false;
-
-        String lowerUrl = url.toLowerCase();
-        return lowerUrl.contains("series") ||
-                lowerUrl.contains("dizi") ||
-                lowerUrl.contains("serial") ||
-                lowerUrl.contains("/series/") ||
-                lowerUrl.contains("/dizi/");
-    }
-
-    public static List<Channel> parseToChannelList(String m3uContent) {
-        List<Channel> channels = new ArrayList<>();
-
-        if (m3uContent == null || m3uContent.isEmpty()) {
-            return channels;
+    private static void turkishFirst(Group g) {
+        List<Category> turkish = new ArrayList<>();
+        List<Category> others = new ArrayList<>();
+        for (Category c : g.categories) {
+            if (isTurkish(c.name)) turkish.add(c);
+            else others.add(c);
         }
-
-        String[] lines = m3uContent.split("\n");
-        String currentName = null;
-        String currentCategory = "GENEL";
-        String currentLogo = "";
-        String currentUrl = null;
-
-        for (String line : lines) {
-            line = line.trim();
-
-            if (line.startsWith("#EXTINF:")) {
-                currentName = extractChannelName(line);
-                currentCategory = extractCategory(line);
-                currentLogo = extractLogo(line);
-
-            } else if (!line.isEmpty() && !line.startsWith("#") && currentName != null) {
-                currentUrl = line;
-
-                String cleanCategory = cleanCategory(currentCategory);
-                channels.add(new Channel(currentName, currentUrl, cleanCategory, currentLogo));
-                currentName = null;
-                currentUrl = null;
-            }
-        }
-
-        return channels;
+        g.categories.clear();
+        g.categories.addAll(turkish);
+        g.categories.addAll(others);
     }
 
-    private static String extractLogo(String extinfLine) {
-        try {
-            if (extinfLine.contains("tvg-logo=")) {
-                int start = extinfLine.indexOf("tvg-logo=\"") + 10;
-                int end = extinfLine.indexOf("\"", start);
-                if (start != -1 && end != -1 && start < end) {
-                    return extinfLine.substring(start, end).trim();
-                }
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-        return "";
+    private static boolean isTurkish(String name) {
+        String n = name.toLowerCase(Locale.ROOT);
+        return n.startsWith("tr") && (n.length() == 2 || !Character.isLetter(n.charAt(2)))
+                || n.startsWith("turk") || n.startsWith("türk")
+                || n.contains("turkish") || n.contains("türkçe") || n.contains("turkey")
+                || n.contains("yerli") || n.contains("ulusal");
     }
 }

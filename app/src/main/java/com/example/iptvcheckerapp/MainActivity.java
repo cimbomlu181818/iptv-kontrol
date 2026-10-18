@@ -1,475 +1,547 @@
 package com.example.iptvcheckerapp;
 
+import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.OpenableColumns;
 import android.text.Editable;
+import android.text.InputType;
 import android.text.TextWatcher;
+import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.CheckBox;
+import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
-import androidx.annotation.Nullable;
-import androidx.appcompat.app.AppCompatActivity;
 
-import java.io.BufferedReader;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
-public class MainActivity extends AppCompatActivity {
+/** Ana ekran: linkleri ekle, panelleri seç, kontrolü başlat. */
+public class MainActivity extends Activity {
 
-    private static final int FILE_PICKER_REQUEST = 1001;
+    private static final int REQ_FILE = 101;
+    private static final String PREFS = "iptv_prefs";
+    private static final int MAX_PANELS_SHOWN = 300;
+    private static final int MAX_SAVED_CHARS = 1500000;
 
-    private Button btnSelectFile, btnStartCheck;
-    private TextView tvSelectedFile, tvProgress;
-    private EditText etManualLinks;
-    private LinearLayout panelSelectionLayout;
-    private CheckBox cbSelectAllPanels;
-    private Button btnChannelList;
+    private EditText etLinks;
+    private TextView tvFile, tvFound, tvThreads;
+    private LinearLayout panelBox;
+    private CheckBox cbAll, cbM3u;
+    private SeekBar sbThreads;
+    private Button btnStart, btnChannels;
 
-    private List<String> linksList = new ArrayList<>();
-    private List<String> allPanelsList = new ArrayList<>();
-    private Set<String> selectedPanels = new HashSet<>();
-    private String selectedFileName = "";
+    private final List<Account> fileAccounts = new ArrayList<>();
+    private List<Account> allAccounts = new ArrayList<>();
+    private final LinkedHashMap<String, Integer> panelCounts = new LinkedHashMap<>();
+    private final Set<String> deselected = new HashSet<>();
+    private String lastPanelSignature = "";
+    private boolean updatingUi = false;
+
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final ExecutorService io = Executors.newSingleThreadExecutor();
+    // Link ayrıştırma ayrı bir iş parçacığında yapılır (büyük yapıştırmalar ekranı dondurmasın)
+    private final ExecutorService parser = Executors.newSingleThreadExecutor();
+    private int parseSeq = 0;
+    private final Runnable parseTask = new Runnable() {
+        @Override
+        public void run() {
+            reparse();
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_main);
-        initViews();
-        setupClickListeners();
-        setupManualTextWatcher();
+        buildUi();
+        restorePrefs();
+        reparse();
     }
 
-    private void initViews() {
-        btnChannelList = findViewById(R.id.btnChannelList);
-        btnSelectFile = findViewById(R.id.btnSelectFile);
-        btnStartCheck = findViewById(R.id.btnStartCheck);
-        tvSelectedFile = findViewById(R.id.tvSelectedFile);
-        tvProgress = findViewById(R.id.tvProgress);
-        etManualLinks = findViewById(R.id.etManualLinks);
-        panelSelectionLayout = findViewById(R.id.panelSelectionLayout);
-        cbSelectAllPanels = findViewById(R.id.cbSelectAllPanels);
-        btnStartCheck.setEnabled(false);
-        btnStartCheck.setAlpha(0.5f);
-        cbSelectAllPanels.setChecked(true);
-        selectedPanels.clear();
-    }
+    // ------------------------------------------------------------------ arayüz
 
-    private void setupManualTextWatcher() {
-        etManualLinks.addTextChangedListener(new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
-            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
-            @Override public void afterTextChanged(Editable s) { updateManualLinksAndPanels(); }
-        });
-    }
+    private void buildUi() {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(Ui.BG);
 
-    private void updateManualLinksAndPanels() {
-        String manualText = etManualLinks.getText().toString().trim();
-        if (manualText.isEmpty()) {
-            if (linksList.isEmpty()) {
-                allPanelsList.clear();
-                selectedPanels.clear();
-                updateUI();
-            } else {
-                updateUI();
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        int pad = Ui.dp(this, 16);
+        root.setPadding(pad, pad, pad, pad);
+        scroll.addView(root, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView title = Ui.text(this, "IPTV Link Kontrol", 24, Ui.TEXT, true);
+        root.addView(title);
+        TextView sub = Ui.text(this, "Linklerin çalışıp çalışmadığını, bitiş tarihini ve kanal sayısını gösterir.",
+                13, Ui.SUB, false);
+        root.addView(sub, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 2, 0, 14));
+
+        // ---- 1. Linkler
+        LinearLayout c1 = Ui.card(this);
+        c1.addView(Ui.text(this, "1. Linkleri ekle", 16, Ui.TEXT, true));
+
+        etLinks = new EditText(this);
+        etLinks.setHint("Linkleri buraya yapıştır (her satıra bir link ya da hepsi birden)…");
+        etLinks.setHintTextColor(Ui.GRAY);
+        etLinks.setTextColor(Ui.TEXT);
+        etLinks.setTextSize(13);
+        etLinks.setMinLines(5);
+        etLinks.setMaxLines(9);
+        etLinks.setGravity(Gravity.TOP | Gravity.START);
+        etLinks.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS | InputType.TYPE_TEXT_VARIATION_URI);
+        etLinks.setBackground(Ui.rounded(this, 0xFFF8F9FC, Ui.LINE, 10));
+        int ep = Ui.dp(this, 10);
+        etLinks.setPadding(ep, ep, ep, ep);
+        etLinks.setOnTouchListener(new View.OnTouchListener() {
+            @Override
+            public boolean onTouch(View v, MotionEvent ev) {
+                if (v.canScrollVertically(1) || v.canScrollVertically(-1)) {
+                    v.getParent().requestDisallowInterceptTouchEvent(true);
+                    if (ev.getAction() == MotionEvent.ACTION_UP) {
+                        v.getParent().requestDisallowInterceptTouchEvent(false);
+                    }
+                }
+                return false;
             }
+        });
+        etLinks.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+
+            @Override
+            public void onTextChanged(CharSequence s, int a, int b, int c) {}
+
+            @Override
+            public void afterTextChanged(Editable s) {
+                handler.removeCallbacks(parseTask);
+                handler.postDelayed(parseTask, 400);
+            }
+        });
+        c1.addView(etLinks, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 8, 0, 8));
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        Button bPaste = Ui.button(this, "📋 Yapıştır", Ui.WHITE, Ui.TEXT);
+        Button bFile = Ui.button(this, "📁 Dosya seç", Ui.WHITE, Ui.TEXT);
+        Button bClear = Ui.button(this, "🗑 Temizle", Ui.WHITE, Ui.RED);
+        row.addView(bPaste, Ui.weight(this, 0, 4));
+        row.addView(bFile, Ui.weight(this, 4, 4));
+        row.addView(bClear, Ui.weight(this, 4, 0));
+        c1.addView(row);
+
+        tvFile = Ui.text(this, "", 12, Ui.SUB, false);
+        tvFile.setVisibility(View.GONE);
+        c1.addView(tvFile, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 8, 0, 0));
+        tvFound = Ui.text(this, "", 14, Ui.PRIMARY, true);
+        c1.addView(tvFound, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 8, 0, 0));
+        root.addView(c1, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 12));
+
+        // ---- 2. Paneller
+        LinearLayout c2 = Ui.card(this);
+        c2.addView(Ui.text(this, "2. Panelleri seç", 16, Ui.TEXT, true));
+        cbAll = new CheckBox(this);
+        cbAll.setText("Tüm paneller");
+        cbAll.setTextColor(Ui.TEXT);
+        cbAll.setChecked(true);
+        c2.addView(cbAll);
+        panelBox = new LinearLayout(this);
+        panelBox.setOrientation(LinearLayout.VERTICAL);
+        c2.addView(panelBox);
+        root.addView(c2, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 12));
+
+        // ---- 3. Ayarlar
+        LinearLayout c3 = Ui.card(this);
+        c3.addView(Ui.text(this, "3. Ayarlar", 16, Ui.TEXT, true));
+        tvThreads = Ui.text(this, "", 14, Ui.TEXT, false);
+        c3.addView(tvThreads, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 8, 0, 0));
+        sbThreads = new SeekBar(this);
+        sbThreads.setMax(19);          // 1 - 20 arası
+        sbThreads.setProgress(7);      // varsayılan 8
+        sbThreads.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar s, int p, boolean user) {
+                updateThreadsText();
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar s) {}
+
+            @Override
+            public void onStopTrackingTouch(SeekBar s) {}
+        });
+        c3.addView(sbThreads);
+        TextView hint = Ui.text(this, "Sayı büyüdükçe kontrol hızlanır. İnternet yavaşsa 4-8 arası dene.", 12, Ui.SUB, false);
+        c3.addView(hint);
+        cbM3u = new CheckBox(this);
+        cbM3u.setText("M3U listesini de kontrol et (kanal sayısını gösterir; her hesap için liste indirilir, mobil veride kota harcar)");
+        cbM3u.setTextColor(Ui.TEXT);
+        cbM3u.setChecked(true);
+        c3.addView(cbM3u, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 8, 0, 0));
+        root.addView(c3, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 14));
+
+        btnStart = Ui.button(this, "▶  Kontrolü Başlat", Ui.PRIMARY, Ui.WHITE);
+        btnStart.setTextSize(16);
+        root.addView(btnStart, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
+        btnChannels = Ui.button(this, "📺  Kanal Listesine Bak", Ui.WHITE, Ui.PRIMARY);
+        root.addView(btnChannels, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
+
+        TextView format = Ui.text(this, "Desteklenen link biçimi:\nhttp://adres:port/get.php?username=…&password=…\nDosya olarak .txt, .m3u ve .docx okunur.",
+                12, Ui.SUB, false);
+        root.addView(format, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 6, 0, 0));
+
+        setContentView(scroll);
+
+        // ---- Düğme olayları
+        bPaste.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pasteFromClipboard();
+            }
+        });
+        bFile.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pickFile();
+            }
+        });
+        bClear.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                etLinks.setText("");
+                fileAccounts.clear();
+                tvFile.setVisibility(View.GONE);
+                deselected.clear();
+                reparse();
+            }
+        });
+        cbAll.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton b, boolean checked) {
+                if (updatingUi) return;
+                if (checked) deselected.clear();
+                else deselected.addAll(panelCounts.keySet());
+                lastPanelSignature = "";
+                rebuildPanels();
+                updateInfo();
+            }
+        });
+        btnStart.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startCheck();
+            }
+        });
+        btnChannels.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openChannels();
+            }
+        });
+        updateThreadsText();
+    }
+
+    private void updateThreadsText() {
+        tvThreads.setText("Aynı anda kontrol edilecek link sayısı: " + (sbThreads.getProgress() + 1));
+    }
+
+    // ------------------------------------------------------------------ linkler ve paneller
+
+    private void reparse() {
+        final String text = etLinks.getText().toString();
+        final int seq = ++parseSeq;
+        try {
+            parser.execute(new Runnable() {
+                @Override
+                public void run() {
+                    final List<Account> manual = LinkParser.extract(text);
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (seq != parseSeq) return;     // daha yeni bir ayrıştırma başladı
+                            applyParsed(manual);
+                        }
+                    });
+                }
+            });
+        } catch (RuntimeException e) {
+            // Ekran kapanmış, yapılacak bir şey yok
+        }
+    }
+
+    private void applyParsed(List<Account> manual) {
+        LinkedHashMap<String, Account> merged = new LinkedHashMap<>();
+        for (Account a : fileAccounts) merged.put(a.dedupeKey(), a);
+        for (Account a : manual) {
+            if (!merged.containsKey(a.dedupeKey())) merged.put(a.dedupeKey(), a);
+        }
+        allAccounts = new ArrayList<>(merged.values());
+
+        panelCounts.clear();
+        for (Account a : allAccounts) {
+            String key = a.panelKey();
+            Integer n = panelCounts.get(key);
+            panelCounts.put(key, n == null ? 1 : n + 1);
+        }
+        deselected.retainAll(panelCounts.keySet());
+        rebuildPanels();
+        updateInfo();
+    }
+
+    private void rebuildPanels() {
+        StringBuilder sig = new StringBuilder();
+        for (Map.Entry<String, Integer> e : panelCounts.entrySet()) {
+            sig.append(e.getKey()).append('=').append(e.getValue())
+                    .append(deselected.contains(e.getKey()) ? "-" : "+").append(';');
+        }
+        if (sig.toString().equals(lastPanelSignature)) return;
+        lastPanelSignature = sig.toString();
+
+        updatingUi = true;
+        panelBox.removeAllViews();
+        if (panelCounts.isEmpty()) {
+            TextView empty = Ui.text(this, "Henüz panel yok. Önce link ekle.", 13, Ui.SUB, false);
+            panelBox.addView(empty);
+        }
+        int shown = 0;
+        for (Map.Entry<String, Integer> e : panelCounts.entrySet()) {
+            if (shown >= MAX_PANELS_SHOWN) {
+                TextView more = Ui.text(this, "… ve " + (panelCounts.size() - shown)
+                        + " panel daha (seçili durumdakiler dahil edilir)", 12, Ui.SUB, false);
+                panelBox.addView(more);
+                break;
+            }
+            final String key = e.getKey();
+            CheckBox cb = new CheckBox(this);
+            cb.setText(key + "   (" + e.getValue() + " link)");
+            cb.setTextColor(Ui.TEXT);
+            cb.setTextSize(14);
+            cb.setChecked(!deselected.contains(key));
+            cb.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+                @Override
+                public void onCheckedChanged(CompoundButton b, boolean checked) {
+                    if (updatingUi) return;
+                    if (checked) deselected.remove(key);
+                    else deselected.add(key);
+                    lastPanelSignature = "";
+                    updateInfo();
+                    lastPanelSignature = currentSignature();
+                }
+            });
+            panelBox.addView(cb);
+            shown++;
+        }
+        updatingUi = false;
+    }
+
+    private String currentSignature() {
+        StringBuilder sig = new StringBuilder();
+        for (Map.Entry<String, Integer> e : panelCounts.entrySet()) {
+            sig.append(e.getKey()).append('=').append(e.getValue())
+                    .append(deselected.contains(e.getKey()) ? "-" : "+").append(';');
+        }
+        return sig.toString();
+    }
+
+    private List<Account> selectedAccounts() {
+        List<Account> list = new ArrayList<>();
+        for (Account a : allAccounts) {
+            if (!deselected.contains(a.panelKey())) list.add(a);
+        }
+        return list;
+    }
+
+    private void updateInfo() {
+        int selected = selectedAccounts().size();
+        tvFound.setText(allAccounts.size() + " link  •  " + panelCounts.size() + " panel  •  seçili: " + selected + " link");
+
+        updatingUi = true;
+        cbAll.setChecked(!panelCounts.isEmpty() && deselected.isEmpty());
+        cbAll.setText("Tüm paneller (" + panelCounts.size() + ")");
+        updatingUi = false;
+
+        boolean enabled = selected > 0;
+        btnStart.setEnabled(enabled);
+        btnChannels.setEnabled(enabled);
+        btnStart.setAlpha(enabled ? 1f : 0.45f);
+        btnChannels.setAlpha(enabled ? 1f : 0.45f);
+    }
+
+    // ------------------------------------------------------------------ pano ve dosya
+
+    private void pasteFromClipboard() {
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm == null || !cm.hasPrimaryClip() || cm.getPrimaryClip() == null
+                || cm.getPrimaryClip().getItemCount() == 0) {
+            Toast.makeText(this, "Panoda metin yok", Toast.LENGTH_SHORT).show();
             return;
         }
-        List<String> manualLinks = extractLinksFromManualText();
-        Set<String> tempPanels = new HashSet<>(allPanelsList);
-        for (String link : manualLinks) {
-            String panelDomain = extractPanelDomain(link);
-            if (panelDomain != null) tempPanels.add(panelDomain);
+        CharSequence t = cm.getPrimaryClip().getItemAt(0).coerceToText(this);
+        if (t == null || t.length() == 0) {
+            Toast.makeText(this, "Panoda metin yok", Toast.LENGTH_SHORT).show();
+            return;
         }
-        allPanelsList.clear();
-        allPanelsList.addAll(tempPanels);
-        updateUI();
+        String current = etLinks.getText().toString();
+        etLinks.setText(current.isEmpty() ? t.toString() : current + "\n" + t);
     }
 
-    private void setupClickListeners() {
-        btnChannelList.setOnClickListener(v -> {
-            if (selectedPanels.isEmpty()) {
-                Toast.makeText(this, "Lütfen önce panel seçin!", Toast.LENGTH_SHORT).show();
-                return;
-            }
-            List<String> filteredLinks = getFilteredLinks();
-            if (filteredLinks.isEmpty()) {
-                Toast.makeText(this, "Seçili panellere ait link bulunamadı!", Toast.LENGTH_SHORT).show();
-                return;
-            }
-            Intent intent = new Intent(this, ChannelListActivity.class);
-            intent.putStringArrayListExtra("links", new ArrayList<>(filteredLinks));
-            intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-            startActivity(intent);
-            Toast.makeText(this, "📺 Kanal listesi aranıyor...", Toast.LENGTH_SHORT).show();
-        });
-
-        btnSelectFile.setOnClickListener(v -> openFilePicker());
-        btnStartCheck.setOnClickListener(v -> startIPTVCheck());
-
-        cbSelectAllPanels.setOnCheckedChangeListener((buttonView, isChecked) -> {
-            if (isChecked) {
-                selectedPanels.clear();
-                selectedPanels.addAll(allPanelsList);
-            } else {
-                selectedPanels.clear();
-            }
-            updatePanelCheckboxes();
-            updateStartButtonState();
-        });
-    }
-
-    private void openFilePicker() {
+    private void pickFile() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
         try {
-            Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
-            intent.setType("*/*");
-            String[] mimeTypes = {"text/plain", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"};
-            intent.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes);
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            startActivityForResult(intent, FILE_PICKER_REQUEST);
+            startActivityForResult(i, REQ_FILE);
         } catch (Exception e) {
-            Toast.makeText(this, "Dosya seçici açılamadı: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Dosya seçici açılamadı", Toast.LENGTH_LONG).show();
         }
     }
 
     @Override
-    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == FILE_PICKER_REQUEST && resultCode == RESULT_OK && data != null) {
-            processSelectedFile(data.getData());
-        }
-    }
-
-    private void processSelectedFile(Uri fileUri) {
-        try {
-            selectedFileName = getFileName(fileUri);
-            linksList.clear();
-            List<String> manualLinks = extractLinksFromManualText();
-            Set<String> manualPanels = new HashSet<>();
-            for (String link : manualLinks) {
-                String panel = extractPanelDomain(link);
-                if (panel != null) manualPanels.add(panel);
+        if (requestCode != REQ_FILE || resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        final Uri uri = data.getData();
+        final String name = fileNameOf(uri);
+        tvFile.setVisibility(View.VISIBLE);
+        tvFile.setText("📄 " + name + " okunuyor…");
+        io.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    String lower = name.toLowerCase(Locale.ROOT);
+                    if (lower.endsWith(".doc")) {
+                        throw new Exception("Eski .doc biçimi okunamıyor. Dosyayı .docx olarak kaydedip tekrar dene.");
+                    }
+                    InputStream in = getContentResolver().openInputStream(uri);
+                    if (in == null) throw new Exception("Dosya açılamadı");
+                    String text;
+                    try {
+                        text = lower.endsWith(".docx") ? DocxReader.read(in) : Http.readText(in, 30 * 1024 * 1024);
+                    } finally {
+                        in.close();
+                    }
+                    final List<Account> found = LinkParser.extract(text);
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            fileAccounts.clear();
+                            fileAccounts.addAll(found);
+                            tvFile.setText("📄 " + name + "  —  " + found.size() + " link");
+                            if (found.isEmpty()) {
+                                Toast.makeText(MainActivity.this, "Bu dosyada geçerli link bulunamadı", Toast.LENGTH_LONG).show();
+                            }
+                            reparse();
+                        }
+                    });
+                } catch (final Exception e) {
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            tvFile.setText("📄 " + name + "  —  okunamadı");
+                            Toast.makeText(MainActivity.this, "Dosya okunamadı: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                        }
+                    });
+                }
             }
-            allPanelsList.clear();
-            selectedPanels.clear();
-            allPanelsList.addAll(manualPanels);
-            if (selectedFileName.toLowerCase().endsWith(".docx")) readWordFile(fileUri);
-            else readTextFile(fileUri);
-        } catch (Exception e) {
-            Toast.makeText(this, "Dosya okunamadı: " + e.getMessage(), Toast.LENGTH_LONG).show();
-        }
+        });
     }
 
-    private String getFileName(Uri uri) {
-        String fileName = null;
+    private String fileNameOf(Uri uri) {
+        String name = null;
         Cursor cursor = null;
         try {
             cursor = getContentResolver().query(uri, null, null, null, null);
             if (cursor != null && cursor.moveToFirst()) {
-                int nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
-                if (nameIndex != -1) fileName = cursor.getString(nameIndex);
+                int idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) name = cursor.getString(idx);
             }
-        } finally { if (cursor != null) cursor.close(); }
-        return fileName != null ? fileName : uri.getLastPathSegment();
-    }
-
-    private void readTextFile(Uri fileUri) {
-        try {
-            InputStream inputStream = getContentResolver().openInputStream(fileUri);
-            BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream));
-            StringBuilder fileContent = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) fileContent.append(line).append("\n");
-            reader.close();
-            findLinksInText(fileContent.toString());
-            updateUI();
-        } catch (Exception e) { throw new RuntimeException("Text dosyası okunamadı: " + e.getMessage()); }
-    }
-
-    private void readWordFile(Uri fileUri) {
-        try {
-            InputStream inputStream = getContentResolver().openInputStream(fileUri);
-            String fileContent = WordReader.readDocxFile(inputStream);
-            inputStream.close();
-            findLinksInText(fileContent);
-            updateUI();
-        } catch (Exception e) { throw new RuntimeException("Word dosyası okunamadı: " + e.getMessage()); }
-    }
-
-    private void findLinksInText(String text) {
-        // "M3U Link:" ile başlayan veya direkt link formatını bulan regex
-        String patternString = "(?:M3U\\s*Link\\s*:|https?://)[^\\s\"'<>]*username=[^\\s\"'&]*&password=[^\\s\"'&]*[^\\s\"'<>]*";
-        Pattern pattern = Pattern.compile(patternString, Pattern.CASE_INSENSITIVE);
-        Matcher matcher = pattern.matcher(text);
-        while (matcher.find()) {
-            String match = matcher.group().trim();
-            // Eğer "M3U Link:" ile başlıyorsa, link kısmını ayır
-            String link = match;
-            if (match.toLowerCase().contains("m3u link")) {
-                // "M3U Link:" kısmını temizle, sadece URL'yi al
-                link = match.replaceFirst("(?i)M3U\\s*Link\\s*:", "").trim();
-            }
-            link = cleanLink(link);
-            if (isValidIPTVLink(link) && !linksList.contains(link)) {
-                linksList.add(link);
-                String panelDomain = extractPanelDomain(link);
-                if (panelDomain != null && !allPanelsList.contains(panelDomain)) allPanelsList.add(panelDomain);
-            }
+        } catch (Exception ignored) {
+            // ad alınamazsa yolun son parçası kullanılır
+        } finally {
+            if (cursor != null) cursor.close();
         }
-        if (linksList.isEmpty()) findLinksAlternative(text);
+        if (name == null) name = uri.getLastPathSegment();
+        return name == null ? "dosya" : name;
     }
 
-    private void findLinksAlternative(String text) {
-        String[] alternativePatterns = {
-                "(?:M3U\\s*Link\\s*:|https?://)[^\\s\"'<>]*?username=[^\\s\"'&]*?&password=[^\\s\"'&]*?[^\\s\"'<>]*",
-                "http[^\\s\"'<>]*username[^\\s\"'&]*password[^\\s\"'&]*",
-                "get\\.php[?]username=[^\\s\"'&]+&password=[^\\s\"'&]+"
-        };
-        for (String altPattern : alternativePatterns) {
-            Pattern pattern = Pattern.compile(altPattern, Pattern.CASE_INSENSITIVE);
-            Matcher matcher = pattern.matcher(text);
-            while (matcher.find()) {
-                String match = matcher.group().trim();
-                String link = match;
-                if (match.toLowerCase().contains("m3u link")) {
-                    link = match.replaceFirst("(?i)M3U\\s*Link\\s*:", "").trim();
-                }
-                link = cleanLink(link);
-                if (!link.startsWith("http") && link.contains("get.php")) link = "http://" + link;
-                if (isValidIPTVLink(link) && !linksList.contains(link)) {
-                    linksList.add(link);
-                    String panelDomain = extractPanelDomain(link);
-                    if (panelDomain != null && !allPanelsList.contains(panelDomain)) allPanelsList.add(panelDomain);
-                }
-            }
-            if (!linksList.isEmpty()) break;
-        }
-    }
+    // ------------------------------------------------------------------ başlat
 
-    private String extractPanelDomain(String link) {
-        try {
-            String url = link;
-            if (!url.startsWith("http")) url = "http://" + url;
-            String host = url.replaceFirst("http://", "").replaceFirst("https://", "");
-            if (host.contains("/")) host = host.substring(0, host.indexOf("/"));
-            if (host.contains(":")) host = host.substring(0, host.indexOf(":"));
-            return host;
-        } catch (Exception e) { return "unknown"; }
-    }
-
-    private String cleanLink(String link) {
-        link = link.replaceAll("[\\n\\r\\t]+", "");
-        link = link.replaceAll("&amp;", "&");
-        link = link.replaceAll("[\\\"']+$", "");
-        link = link.replaceAll("^[\\\"']+", "");
-        link = link.replaceAll("\\\\/", "/");
-        return link.trim();
-    }
-
-    private boolean isValidIPTVLink(String link) {
-        if (link == null || link.length() < 10) return false;
-        boolean hasHttp = link.startsWith("http://") || link.startsWith("https://");
-        boolean hasUsername = link.contains("username=");
-        boolean hasPassword = link.contains("password=");
-        boolean hasGetPhp = link.contains("get.php");
-        return hasHttp && hasUsername && hasPassword && hasGetPhp;
-    }
-
-    private void updateUI() {
-        String fileInfo = "Seçilen dosya: " + selectedFileName + " (" + linksList.size() + " link)";
-        if (selectedFileName.isEmpty() || linksList.isEmpty()) fileInfo = "Dosyadan link yok";
-        tvSelectedFile.setText(fileInfo);
-        int manualLinkCount = extractLinksFromManualText().size();
-        int totalLinks = linksList.size() + manualLinkCount;
-        if (totalLinks > 0) {
-            updatePanelSelectionUI();
-            String progressText = "✅ Toplam " + totalLinks + " link bulundu";
-            if (linksList.size() > 0 && manualLinkCount > 0) progressText += " (Dosya: " + linksList.size() + " + Manuel: " + manualLinkCount + ")";
-            else if (manualLinkCount > 0) progressText += " (Manuel giriş)";
-            progressText += ". Panelleri seçin ve kontrolü başlatın.";
-            tvProgress.setText(progressText);
-            updateStartButtonState();
-        } else {
-            tvProgress.setText("❌ Hiç link bulunamadı! Link formatı: http://.../get.php?username=XXX&password=XXX");
-            btnStartCheck.setEnabled(false);
-            btnStartCheck.setAlpha(0.5f);
-            btnChannelList.setEnabled(false);
-            btnChannelList.setAlpha(0.5f);
-            panelSelectionLayout.setVisibility(View.GONE);
-        }
-    }
-
-    private void updatePanelSelectionUI() {
-        panelSelectionLayout.removeAllViews();
-        if (allPanelsList.isEmpty()) {
-            TextView noPanelText = new TextView(this);
-            noPanelText.setText("Panel bulunamadı");
-            noPanelText.setPadding(0, 16, 0, 16);
-            panelSelectionLayout.addView(noPanelText);
+    private void startCheck() {
+        List<Account> sel = selectedAccounts();
+        if (sel.isEmpty()) {
+            Toast.makeText(this, "Önce link ekleyip en az bir panel seç", Toast.LENGTH_SHORT).show();
             return;
         }
-        cbSelectAllPanels.setText("Tüm Paneller (" + allPanelsList.size() + ")");
-        if (cbSelectAllPanels.isChecked()) {
-            selectedPanels.clear();
-            selectedPanels.addAll(allPanelsList);
-        }
-        for (String panel : allPanelsList) {
-            CheckBox checkBox = new CheckBox(this);
-            checkBox.setText(panel);
-            checkBox.setTag(panel);
-            checkBox.setChecked(selectedPanels.contains(panel));
-            checkBox.setPadding(0, 8, 0, 8);
-            checkBox.setOnCheckedChangeListener((buttonView, isChecked) -> {
-                String panelDomain = (String) buttonView.getTag();
-                if (cbSelectAllPanels.isChecked()) {
-                    cbSelectAllPanels.setChecked(false);
-                    selectedPanels.clear();
-                    selectedPanels.addAll(allPanelsList);
-                    selectedPanels.remove(panelDomain);
-                    updatePanelCheckboxes();
-                } else {
-                    if (isChecked) selectedPanels.add(panelDomain);
-                    else selectedPanels.remove(panelDomain);
-                }
-                updateStartButtonState();
-            });
-            panelSelectionLayout.addView(checkBox);
-        }
-        panelSelectionLayout.setVisibility(View.VISIBLE);
+        Session.accounts = sel;
+        Session.checkM3u = cbM3u.isChecked();
+        Session.threads = sbThreads.getProgress() + 1;
+        startActivity(new Intent(this, ResultsActivity.class));
     }
 
-    private void updatePanelCheckboxes() {
-        for (int i = 0; i < panelSelectionLayout.getChildCount(); i++) {
-            View view = panelSelectionLayout.getChildAt(i);
-            if (view instanceof CheckBox) {
-                CheckBox checkBox = (CheckBox) view;
-                String panelDomain = (String) checkBox.getTag();
-                checkBox.setOnCheckedChangeListener(null);
-                checkBox.setChecked(selectedPanels.contains(panelDomain));
-                checkBox.setOnCheckedChangeListener((buttonView, isChecked) -> {
-                    String domain = (String) buttonView.getTag();
-                    if (cbSelectAllPanels.isChecked()) {
-                        cbSelectAllPanels.setChecked(false);
-                        selectedPanels.clear();
-                        selectedPanels.addAll(allPanelsList);
-                        selectedPanels.remove(domain);
-                        updatePanelCheckboxes();
-                    } else {
-                        if (isChecked) selectedPanels.add(domain);
-                        else selectedPanels.remove(domain);
-                    }
-                    updateStartButtonState();
-                });
-                checkBox.setEnabled(true);
-            }
-        }
-    }
-
-    private void updateStartButtonState() {
-        boolean hasSelectedPanels = !selectedPanels.isEmpty();
-        boolean hasLinks = !linksList.isEmpty() || !extractLinksFromManualText().isEmpty();
-        btnChannelList.setEnabled(hasSelectedPanels && hasLinks);
-        btnChannelList.setAlpha((hasSelectedPanels && hasLinks) ? 1.0f : 0.5f);
-        if (hasSelectedPanels && hasLinks) {
-            btnStartCheck.setEnabled(true);
-            btnStartCheck.setAlpha(1.0f);
-            tvProgress.setText("✅ " + getFilteredLinkCount() + " link seçildi. Kontrol başlatılabilir.");
-        } else {
-            btnStartCheck.setEnabled(false);
-            btnStartCheck.setAlpha(0.5f);
-            if (!hasSelectedPanels && hasLinks) tvProgress.setText("❌ Lütfen en az bir panel seçin!");
-        }
-    }
-
-    private int getFilteredLinkCount() {
-        List<String> allLinks = getAllLinks();
-        int count = 0;
-        for (String link : allLinks) {
-            if (selectedPanels.contains(extractPanelDomain(link))) count++;
-        }
-        return count;
-    }
-
-    private List<String> extractLinksFromManualText() {
-        List<String> manualLinks = new ArrayList<>();
-        String manualText = etManualLinks.getText().toString().trim();
-        if (manualText.isEmpty()) return manualLinks;
-
-        // "M3U Link:" formatını da yakalayan yeni regex
-        String patternString = "(?:M3U\\s*Link\\s*:|https?://)[^\\s\"'<>]*username=[^\\s\"'&]*&password=[^\\s\"'&]*[^\\s\"'<>]*";
-        Pattern pattern = Pattern.compile(patternString, Pattern.CASE_INSENSITIVE);
-        Matcher matcher = pattern.matcher(manualText);
-
-        while (matcher.find()) {
-            String match = matcher.group().trim();
-            String link = match;
-            if (match.toLowerCase().contains("m3u link")) {
-                link = match.replaceFirst("(?i)M3U\\s*Link\\s*:", "").trim();
-            }
-            link = cleanLink(link);
-            if (isValidIPTVLink(link) && !manualLinks.contains(link)) {
-                manualLinks.add(link);
-            }
-        }
-        return manualLinks;
-    }
-
-    private List<String> getAllLinks() {
-        List<String> allLinks = new ArrayList<>(linksList);
-        allLinks.addAll(extractLinksFromManualText());
-        return allLinks;
-    }
-
-    private List<String> getFilteredLinks() {
-        List<String> filteredLinks = new ArrayList<>();
-        for (String link : getAllLinks()) {
-            if (selectedPanels.contains(extractPanelDomain(link))) filteredLinks.add(link);
-        }
-        return filteredLinks;
-    }
-
-    private void showFoundLinksPreview() {
-        List<String> allLinks = getAllLinks();
-        if (allLinks.size() > 0) {
-            StringBuilder preview = new StringBuilder("Bulunan linkler:\n");
-            for (int i = 0; i < Math.min(3, allLinks.size()); i++) {
-                String link = allLinks.get(i);
-                String shortLink = link.length() > 60 ? link.substring(0, 60) + "..." : link;
-                preview.append("• ").append(shortLink).append("\n");
-            }
-            if (allLinks.size() > 3) preview.append("... ve ").append(allLinks.size() - 3).append(" link daha");
-            Toast.makeText(this, preview.toString(), Toast.LENGTH_LONG).show();
-        }
-    }
-
-    private void startIPTVCheck() {
-        List<String> filteredLinks = getFilteredLinks();
-        if (filteredLinks.isEmpty()) {
-            Toast.makeText(this, "❌ Seçili panellere ait link bulunamadı!", Toast.LENGTH_LONG).show();
+    private void openChannels() {
+        List<Account> sel = selectedAccounts();
+        if (sel.isEmpty()) {
+            Toast.makeText(this, "Önce link ekleyip en az bir panel seç", Toast.LENGTH_SHORT).show();
             return;
         }
-        Intent intent = new Intent(this, ResultActivity.class);
-        intent.putStringArrayListExtra("links", new ArrayList<>(filteredLinks));
-        startActivity(intent);
-        Toast.makeText(this, "🚀 " + filteredLinks.size() + " link kontrol ediliyor...", Toast.LENGTH_SHORT).show();
+        Session.channelAccounts = sel;
+        startActivity(new Intent(this, ChannelsActivity.class));
+    }
+
+    // ------------------------------------------------------------------ kayıt
+
+    private void restorePrefs() {
+        SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String text = p.getString("links", "");
+        if (text != null && !text.isEmpty()) etLinks.setText(text);
+        sbThreads.setProgress(Math.max(0, Math.min(19, p.getInt("threads", 8) - 1)));
+        cbM3u.setChecked(p.getBoolean("m3u", true));
+        updateThreadsText();
     }
 
     @Override
-    public void onBackPressed() {
-        super.onBackPressed();
-        // Sadece finish - uygulamayı öldürme
-        finish();
+    protected void onPause() {
+        super.onPause();
+        String text = etLinks.getText().toString();
+        if (text.length() > MAX_SAVED_CHARS) text = text.substring(0, MAX_SAVED_CHARS);
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString("links", text)
+                .putInt("threads", sbThreads.getProgress() + 1)
+                .putBoolean("m3u", cbM3u.isChecked())
+                .apply();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        handler.removeCallbacks(parseTask);
+        io.shutdownNow();
+        parser.shutdownNow();
     }
 }

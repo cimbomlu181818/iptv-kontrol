@@ -52,13 +52,6 @@ public class CheckResult {
         return maxConnections > 0 && activeConnections >= 0 && activeConnections < maxConnections;
     }
 
-    /** Hesap henüz bitmemiş ve en geç verilen gün sayısı içinde bitecek mi? */
-    public boolean expiresWithin(int days) {
-        if (!hasExpiry) return false;
-        long left = expiresAtMs - nowMs();
-        return left > 0 && left <= days * 86400000L;
-    }
-
     public State getState() {
         boolean m3uGood = m3uChecked && m3uOk;
         if (apiOk && (!m3uChecked || m3uOk)) return State.FULL;

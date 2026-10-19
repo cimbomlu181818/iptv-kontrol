@@ -48,7 +48,6 @@ public class ResultsActivity extends Activity {
 
     private static final int MAX_SHARE_CHARS = 300000;
     private static final int REQ_SAVE = 201;
-    private static final int SOON_DAYS = 7;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<CheckResult> all = new ArrayList<>();
@@ -74,7 +73,6 @@ public class ResultsActivity extends Activity {
     private final Set<String> fMax = new HashSet<>();
     private int fTrial = 0;                     // 0 hepsi, 1 sadece deneme, 2 deneme hariç
     private boolean fFree = false;              // sadece şu an boş (bağlantı hakkı dolmamış) olanlar
-    private boolean fSoon = false;              // sadece SOON_DAYS gün içinde bitecek olanlar
     private int sortMode = 0;                   // 0 geliş sırası, 1 bitiş tarihi, 2 kanal sayısı, 3 yanıt süresi
 
     // Ekran parçaları
@@ -82,7 +80,7 @@ public class ResultsActivity extends Activity {
     private ProgressBar bar;
     private Button btnStop, btnCopy, btnShare, btnRetry, btnSave, btnClean, btnAddList;
     private final TextView[] chips = new TextView[5];
-    private TextView chipFree, chipSoon;
+    private TextView chipFree;
     private ListView listView;
     private RowAdapter adapter;
 
@@ -236,7 +234,6 @@ public class ResultsActivity extends Activity {
         if (fTrial == 1 && !r.trial) return false;
         if (fTrial == 2 && r.trial) return false;
         if (fFree && !r.isFree()) return false;
-        if (fSoon && !r.expiresWithin(SOON_DAYS)) return false;
         return true;
     }
 
@@ -317,7 +314,6 @@ public class ResultsActivity extends Activity {
         }
         for (int i = 0; i < chips.length; i++) Ui.setChipSelected(this, chips[i], mode == i);
         Ui.setChipSelected(this, chipFree, fFree);
-        Ui.setChipSelected(this, chipSoon, fSoon);
     }
 
     private String filterSummary() {
@@ -328,7 +324,6 @@ public class ResultsActivity extends Activity {
         if (fTrial == 1) parts.add("Sadece deneme");
         if (fTrial == 2) parts.add("Deneme hariç");
         if (fFree) parts.add("Şu an boş olanlar");
-        if (fSoon) parts.add(SOON_DAYS + " gün içinde bitecek");
         if (sortMode == 1) parts.add("Sıra: bitiş tarihi");
         if (sortMode == 2) parts.add("Sıra: kanal sayısı");
         if (sortMode == 3) parts.add("Sıra: yanıt süresi");
@@ -449,15 +444,6 @@ public class ResultsActivity extends Activity {
         });
         row2.addView(yearChip, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
 
-        TextView panelChip = Ui.chip(this, "Panel");
-        panelChip.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                pickMulti("Panel", panelOptions(), fPanels);
-            }
-        });
-        row2.addView(panelChip, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
-
         chipFree = Ui.chip(this, "🟢 Şu an boş olanlar");
         chipFree.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -468,15 +454,14 @@ public class ResultsActivity extends Activity {
         });
         row2.addView(chipFree, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
 
-        chipSoon = Ui.chip(this, "⏳ " + SOON_DAYS + " gün içinde bitecek");
-        chipSoon.setOnClickListener(new View.OnClickListener() {
+        TextView panelChip = Ui.chip(this, "Panel");
+        panelChip.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                fSoon = !fSoon;
-                refresh();
+                pickMulti("Panel", panelOptions(), fPanels);
             }
         });
-        row2.addView(chipSoon, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
+        row2.addView(panelChip, Ui.lp(this, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 6, 0));
 
         TextView clearChip = Ui.chip(this, "Tüm filtreleri temizle");
         clearChip.setOnClickListener(new View.OnClickListener() {
@@ -734,7 +719,6 @@ public class ResultsActivity extends Activity {
         fMax.clear();
         fTrial = 0;
         fFree = false;
-        fSoon = false;
         mode = 0;
         sortMode = 0;
         refresh();

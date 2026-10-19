@@ -207,7 +207,7 @@ public class MainActivity extends Activity {
         cbM3u = new CheckBox(this);
         cbM3u.setText("M3U listesini de kontrol et (kanal sayısını gösterir; her hesap için liste indirilir, mobil veride kota harcar)");
         cbM3u.setTextColor(Ui.TEXT);
-        cbM3u.setChecked(true);
+        cbM3u.setChecked(false);        // her zaman işaretsiz başlar: kota harcamak için bilerek işaretlenmeli
         c3.addView(cbM3u, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 8, 0, 0));
         root.addView(c3, Ui.lp(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 14));
 
@@ -585,6 +585,7 @@ public class MainActivity extends Activity {
         Session.accounts = sel;
         Session.checkM3u = cbM3u.isChecked();
         Session.threads = sbThreads.getProgress() + 1;
+        cbM3u.setChecked(false);        // unutulup bir sonraki sorguda kota harcamasın
         startActivity(new Intent(this, ResultsActivity.class));
     }
 
@@ -595,7 +596,6 @@ public class MainActivity extends Activity {
         String text = p.getString("links", "");
         if (text != null && !text.isEmpty()) etLinks.setText(text);
         sbThreads.setProgress(Math.max(0, Math.min(19, p.getInt("threads", 8) - 1)));
-        cbM3u.setChecked(p.getBoolean("m3u", true));
         updateThreadsText();
 
         // Dosyadan okunan linkler de uygulama kapanınca kaybolmasın
@@ -635,7 +635,6 @@ public class MainActivity extends Activity {
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                 .putString("links", text)
                 .putInt("threads", sbThreads.getProgress() + 1)
-                .putBoolean("m3u", cbM3u.isChecked())
                 .apply();
     }
 
